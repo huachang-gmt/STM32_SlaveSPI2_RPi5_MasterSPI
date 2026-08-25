@@ -1435,3 +1435,236 @@ DUP/OOO=0
 ```
 
 作為基準，採取小幅度、可驗證、可回退的方式進行。
+
+
+# 檔案修改
+### [2026-08-25] 檔案架構修改
+
+```text
+Core/
+└── Src/
+    └── main.c
+
+Core/
+├── Inc/
+│   └── spi2_slave.h
+│
+└── Src/
+    ├── main.c
+    └── spi2_slave.c
+```
+
+責任如下：
+
+main.c
+
+只負責：
+
+- STM32H755 啟動
+- Clock
+- GPIO
+- SPI2 peripheral initialization（CubeMX）
+- LED / COM 初始化
+- 測試程式的控制流程
+
+spi2_slave.c  
+負責：
+
+- SPI2 Slave 傳送
+- PE3 → CM5 notification
+- sequence number
+- SPI error counter
+- timeout / busy / HAL error
+- Yellow LED debug
+- 未來 204-byte SPI 傳送的底層實作
+
+只提供一個使用的公開 API：
+```c
+HAL_StatusTypeDef SPI2_Slave_SendPacket(const uint8_t *data,
+                                        uint16_t length);
+```
+
+## 修改完成後的架構
+
+```text
+                    STM32H755 CM7
+┌──────────────────────────────────────────────┐
+│                                              │
+│                  main.c                      │
+│                                              │
+│  HAL_Init()                                  │
+│  SystemClock_Config()                        │
+│  MX_GPIO_Init()                              │
+│  MX_SPI2_Init()                              │
+│                                              │
+│       Temporary test only                    │
+│              │                               │
+│              ▼                               │
+│  SPI2_Slave_SendPacket()                     │
+│              │                               │
+└──────────────┼───────────────────────────────┘
+               │
+               ▼
+       ┌──────────────────┐
+       │  spi2_slave.c    │
+       │                  │
+       │ PE3 notification │
+       │ SPI2 transmit    │
+       │ error handling   │
+       │ debug counters   │
+       │ yellow LED       │
+       └────────┬─────────┘
+                │
+                │ SPI2
+                │
+                ▼
+        Raspberry Pi CM5
+```
+未來看到的介面只有：
+```c
+SPI2_Slave_SendPacket(data, length);
+```
+
+### 測試結果
+
+```text
+herman@RPiCM5:~/spi-master-test $ ./spi_master_irq_16byte_test
+========================================
+CM5 SPI Master + GPIO25 Interrupt Test
+========================================
+GPIO chip : /dev/gpiochip0
+GPIO line : 25
+Edge      : RISING
+SPI device: /dev/spidev0.0
+SPI mode  : 0
+SPI speed : 1000000 Hz
+RX size   : 16 bytes
+========================================
+[SPI] Device       : /dev/spidev0.0
+[SPI] Mode         : 0
+[SPI] Bits         : 8
+[SPI] Speed        : 1000000 Hz
+[TEST] Expected RX : 00 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E
+========================================
+Waiting for STM32H755 PE3...
+========================================
+
+[13:09:55] GPIO25 RISING  IRQ=1
+[SPI] Starting Master transaction...
+[SPI] RX data : 00 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E
+[SEQ] Received=0
+[VERIFY] PASS
+[STAT] IRQ=1 SPI=1 PASS=1 FAIL=0 SEQ_ERR=0 MISSING=0 DUP/OOO=0
+Waiting for next STM32H755 PE3...
+
+[13:09:55] GPIO25 RISING  IRQ=2
+[SPI] Starting Master transaction...
+[SPI] RX data : 01 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E
+[SEQ] Received=1
+[VERIFY] PASS
+[STAT] IRQ=2 SPI=2 PASS=2 FAIL=0 SEQ_ERR=0 MISSING=0 DUP/OOO=0
+Waiting for next STM32H755 PE3...
+
+[13:09:56] GPIO25 RISING  IRQ=3
+[SPI] Starting Master transaction...
+[SPI] RX data : 02 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E
+[SEQ] Received=2
+[VERIFY] PASS
+[STAT] IRQ=3 SPI=3 PASS=3 FAIL=0 SEQ_ERR=0 MISSING=0 DUP/OOO=0
+Waiting for next STM32H755 PE3...
+
+[13:09:56] GPIO25 RISING  IRQ=4
+[SPI] Starting Master transaction...
+[SPI] RX data : 03 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E
+[SEQ] Received=3
+[VERIFY] PASS
+[STAT] IRQ=4 SPI=4 PASS=4 FAIL=0 SEQ_ERR=0 MISSING=0 DUP/OOO=0
+Waiting for next STM32H755 PE3...
+
+[13:09:57] GPIO25 RISING  IRQ=5
+[SPI] Starting Master transaction...
+[SPI] RX data : 04 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E
+[SEQ] Received=4
+[VERIFY] PASS
+[STAT] IRQ=5 SPI=5 PASS=5 FAIL=0 SEQ_ERR=0 MISSING=0 DUP/OOO=0
+Waiting for next STM32H755 PE3...
+
+[13:09:57] GPIO25 RISING  IRQ=6
+[SPI] Starting Master transaction...
+[SPI] RX data : 05 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E
+[SEQ] Received=5
+[VERIFY] PASS
+[STAT] IRQ=6 SPI=6 PASS=6 FAIL=0 SEQ_ERR=0 MISSING=0 DUP/OOO=0
+Waiting for next STM32H755 PE3...
+
+[13:09:58] GPIO25 RISING  IRQ=7
+[SPI] Starting Master transaction...
+[SPI] RX data : 06 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E
+[SEQ] Received=6
+[VERIFY] PASS
+[STAT] IRQ=7 SPI=7 PASS=7 FAIL=0 SEQ_ERR=0 MISSING=0 DUP/OOO=0
+Waiting for next STM32H755 PE3...
+
+[13:09:58] GPIO25 RISING  IRQ=8
+[SPI] Starting Master transaction...
+[SPI] RX data : 07 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E
+[SEQ] Received=7
+[VERIFY] PASS
+[STAT] IRQ=8 SPI=8 PASS=8 FAIL=0 SEQ_ERR=0 MISSING=0 DUP/OOO=0
+Waiting for next STM32H755 PE3...
+
+[13:09:59] GPIO25 RISING  IRQ=9
+[SPI] Starting Master transaction...
+[SPI] RX data : 08 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E
+[SEQ] Received=8
+[VERIFY] PASS
+[STAT] IRQ=9 SPI=9 PASS=9 FAIL=0 SEQ_ERR=0 MISSING=0 DUP/OOO=0
+Waiting for next STM32H755 PE3...
+
+[13:09:59] GPIO25 RISING  IRQ=10
+[SPI] Starting Master transaction...
+[SPI] RX data : 09 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E
+[SEQ] Received=9
+[VERIFY] PASS
+[STAT] IRQ=10 SPI=10 PASS=10 FAIL=0 SEQ_ERR=0 MISSING=0 DUP/OOO=0
+Waiting for next STM32H755 PE3...
+
+```
+
+## 基礎 SPI Slave/Interrupt 架構驗證
+```text
+STM32H755 CM7
+     │
+     │ 產生 16-byte packet
+     │
+     ▼
+SPI2 Slave
+     │
+     │ PE3 = HIGH
+     ▼
+CM5 GPIO25 Rising Edge
+     │
+     ▼
+CM5 SPI Master
+     │
+     │ 16-byte SPI transaction
+     ▼
+收到 packet
+     │
+     ├── Sequence Number 檢查
+     │
+     └── Payload Pattern 檢查
+     ▼
+PASS
+```
+
+### Phase A — 已完成
+```text
+500 ms
+16 bytes
+GPIO interrupt
+SPI Master/Slave
+Sequence verification
+```
+> 這個版本已經確認 SPI2 Slave + PE3 trigger + CM5 GPIO25 interrupt + 16-byte sequence validation 全部正常。 確認這次分割檔案是成功的。
+
