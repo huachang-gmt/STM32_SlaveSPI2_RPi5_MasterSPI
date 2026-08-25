@@ -1666,5 +1666,28 @@ GPIO interrupt
 SPI Master/Slave
 Sequence verification
 ```
+
+```text
+CM7
+├── Core/Inc/
+│   └── spi2_slave.h
+│       └── 唯一對外 API
+│           SPI2_Slave_SendPacket()
+│
+├── Core/Src/
+│   ├── spi2_slave.c
+│   │   └── SPI2 Slave 實際傳送
+│   │       ├── PE3 HIGH
+│   │       ├── HAL_SPI_Transmit()
+│   │       ├── PE3 LOW
+│   │       └── error/counter
+│   │
+│   └── main.c
+│       └── CubeMX 初始化
+│       └── 目前暫時的 500 ms test producer
+```
+
 > 這個版本已經確認 SPI2 Slave + PE3 trigger + CM5 GPIO25 interrupt + 16-byte sequence validation 全部正常。 確認這次分割檔案是成功的。
+
+> PE3 → GPIO25 IRQ → CM5 SPI Master → STM32 SPI Slave → 16 bytes → sequence verification  
 

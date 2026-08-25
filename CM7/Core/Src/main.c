@@ -173,7 +173,7 @@ Error_Handler();
     static uint32_t last_test_tick = 0U;
     uint32_t now = HAL_GetTick();
 
-    if ((now - last_test_tick) >= 500U)
+    if ((now - last_test_tick) >= 1U)
     {
         last_test_tick = now;
 
