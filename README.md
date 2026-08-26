@@ -91,6 +91,15 @@ CM5 執行 Linux C++ SPI Master 測試程式。
 
 ---
 
+
+# 硬體連接圖
+
+![SPI_Connection_1](images/connection1.png)
+![SPI_Connection_2](images/connection2.png)
+
+
+---
+
 # 3. SPI Architecture
 
 目前架構：
@@ -1690,4 +1699,13 @@ CM7
 > 這個版本已經確認 SPI2 Slave + PE3 trigger + CM5 GPIO25 interrupt + 16-byte sequence validation 全部正常。 確認這次分割檔案是成功的。
 
 > PE3 → GPIO25 IRQ → CM5 SPI Master → STM32 SPI Slave → 16 bytes → sequence verification  
+
+# 更新版本
+## [2026-08-26] 修改檔案 spi_master_irq_16byte_test.cpp
+### 修改原因： 增加 四個 Ring Buffer
+
+
+
+
+
 

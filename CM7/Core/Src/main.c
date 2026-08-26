@@ -178,31 +178,63 @@ Error_Handler();
         last_test_tick = now;
 
         /*
-         * ----------------------------------------------------
-         * Temporary 16-byte bring-up test.
+         * ====================================================
+         * 204-byte / 1 ms SPI2 Slave Test
+         * ====================================================
          *
-         * This code will eventually be removed when the
-         * EtherCAT 1 ms producer is integrated.
-         * ----------------------------------------------------
+         * Test objective:
+         *
+         *     STM32H755 CM7
+         *         |
+         *         | every 1 ms
+         *         v
+         *     prepare 204-byte test packet
+         *         |
+         *         v
+         *     SPI2_Slave_SendPacket()
+         *         |
+         *         v
+         *     PE3 HIGH -> CM5 GPIO25
+         *         |
+         *         v
+         *     CM5 SPI Master reads 204 bytes
+         *
+         * This is a bring-up test only.
+         *
+         * The 204-byte test buffer represents the buffer that
+         * will later be supplied by the EtherCAT application.
+         *
+         * IMPORTANT:
+         *
+         * The final application architecture must NOT block
+         * the 1 ms EtherCAT producer while waiting for the
+         * SPI transaction to finish.
+         *
+         * This current test intentionally uses the existing
+         * SPI2_Slave_SendPacket() API so that we can first
+         * measure the actual 204-byte SPI path.
+         * ====================================================
          */
 
-        static uint8_t test_packet[16] =
-        {
-            0x00, 0x00,
-            0x01, 0x02, 0x03, 0x04,
-            0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0A, 0x0B, 0x0C,
-            0x0D, 0x0E
-        };
+        static uint8_t test_packet[204U];
 
         static uint16_t test_sequence = 0U;
 
 
         /*
+         * ----------------------------------------------------
          * Byte 0-1:
          *
          * 16-bit sequence number, little-endian.
+         *
+         * This allows CM5 to verify:
+         *
+         *     - packet continuity
+         *     - packet loss
+         *     - duplicate / out-of-order packets
+         * ----------------------------------------------------
          */
+
         test_packet[0] =
             (uint8_t)(test_sequence & 0xFFU);
 
@@ -211,18 +243,50 @@ Error_Handler();
 
 
         /*
-         * Use the SAME public API that the future
-         * EtherCAT producer will use.
+         * ----------------------------------------------------
+         * Byte 2-203:
+         *
+         * Fixed test pattern.
+         *
+         * This represents the remaining application data.
+         *
+         * We intentionally generate deterministic data so CM5
+         * can verify every byte.
+         * ----------------------------------------------------
          */
+
+        for (uint16_t i = 2U; i < 204U; ++i)
+        {
+            test_packet[i] =
+                (uint8_t)(i & 0xFFU);
+        }
+
+
+        /*
+         * ----------------------------------------------------
+         * Send one complete 204-byte packet.
+         *
+         * Use the SAME public API that the future application
+         * data producer will use.
+         * ----------------------------------------------------
+         */
+
         if (SPI2_Slave_SendPacket(test_packet,
                                   sizeof(test_packet)) == HAL_OK)
         {
-            BSP_LED_Toggle(LED_GREEN);
-
             test_sequence++;
         }
         else
         {
+            /*
+             * SPI error.
+             *
+             * Do not print here because this path is executed
+             * at a high rate and terminal I/O would disturb
+             * timing.
+             *
+             * SPI2_Slave.c already maintains error counters.
+             */
             BSP_LED_Toggle(LED_RED);
         }
     }
