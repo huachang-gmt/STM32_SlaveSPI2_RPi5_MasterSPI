@@ -1702,9 +1702,301 @@ CM7
 
 # 更新版本
 ## [2026-08-26] 修改檔案 spi_master_irq_16byte_test.cpp
-### 修改原因： 增加 四個 Ring Buffer
+### 修改原因： 增加 四個 Ring Buffer，並增加 寫入與讀出和 溢出 的測試程式。
 
+## 輸出結果 ： (由 COM PORT)
 
+```text
+========================================
+HM Ring Buffer Test
+========================================
+[TEST 1] Write 4 packets
+  Write packet 0 : OK
+    write=1 read=0 pending=1
+  Write packet 1 : OK
+    write=2 read=0 pending=2
+  Write packet 2 : OK
+    write=3 read=0 pending=3
+  Write packet 3 : OK
+    write=0 read=0 pending=4
+
+[TEST 2] Read 4 packets
+  Read packet 0 : OK
+    sequence=0 first_data=0 read=1 pending=3
+  Read packet 1 : OK
+    sequence=1 first_data=1 read=2 pending=2
+  Read packet 2 : OK
+    sequence=2 first_data=2 read=3 pending=1
+  Read packet 3 : OK
+    sequence=3 first_data=3 read=0 pending=0
+
+[TEST 3] Overflow test
+  Buffer filled: pending=4
+  Write packet #5 : REJECTED (EXPECTED)
+  pending=4
+  overflow=1
+  Cleanup: pending=0
+========================================
+
+========================================
+HM Ring Buffer Test
+========================================
+[TEST 1] Write 4 packets
+  Write packet 0 : OK
+    write=1 read=0 pending=1
+  Write packet 1 : OK
+    write=2 read=0 pending=2
+  Write packet 2 : OK
+    write=3 read=0 pending=3
+  Write packet 3 : OK
+    write=0 read=0 pending=4
+
+[TEST 2] Read 4 packets
+  Read packet 0 : OK
+    sequence=8 first_data=0 read=1 pending=3
+  Read packet 1 : OK
+    sequence=9 first_data=1 read=2 pending=2
+  Read packet 2 : OK
+    sequence=10 first_data=2 read=3 pending=1
+  Read packet 3 : OK
+    sequence=11 first_data=3 read=0 pending=0
+
+[TEST 3] Overflow test
+  Buffer filled: pending=4
+  Write packet #5 : REJECTED (EXPECTED)
+  pending=4
+  overflow=2
+  Cleanup: pending=0
+========================================
+
+========================================
+HM Ring Buffer Test
+========================================
+[TEST 1] Write 4 packets
+  Write packet 0 : OK
+    write=1 read=0 pending=1
+  Write packet 1 : OK
+    write=2 read=0 pending=2
+  Write packet 2 : OK
+    write=3 read=0 pending=3
+  Write packet 3 : OK
+    write=0 read=0 pending=4
+
+[TEST 2] Read 4 packets
+  Read packet 0 : OK
+    sequence=16 first_data=0 read=1 pending=3
+  Read packet 1 : OK
+    sequence=17 first_data=1 read=2 pending=2
+  Read packet 2 : OK
+    sequence=18 first_data=2 read=3 pending=1
+  Read packet 3 : OK
+    sequence=19 first_data=3 read=0 pending=0
+
+[TEST 3] Overflow test
+  Buffer filled: pending=4
+  Write packet #5 : REJECTED (EXPECTED)
+  pending=4
+  overflow=3
+  Cleanup: pending=0
+========================================
+
+========================================
+HM Ring Buffer Test
+========================================
+[TEST 1] Write 4 packets
+  Write packet 0 : OK
+    write=1 read=0 pending=1
+  Write packet 1 : OK
+    write=2 read=0 pending=2
+  Write packet 2 : OK
+    write=3 read=0 pending=3
+  Write packet 3 : OK
+    write=0 read=0 pending=4
+
+[TEST 2] Read 4 packets
+  Read packet 0 : OK
+    sequence=24 first_data=0 read=1 pending=3
+  Read packet 1 : OK
+    sequence=25 first_data=1 read=2 pending=2
+  Read packet 2 : OK
+    sequence=26 first_data=2 read=3 pending=1
+  Read packet 3 : OK
+    sequence=27 first_data=3 read=0 pending=0
+
+[TEST 3] Overflow test
+  Buffer filled: pending=4
+  Write packet #5 : REJECTED (EXPECTED)
+  pending=4
+  overflow=4
+  Cleanup: pending=0
+========================================
+```
+## 說明
+
+這幾組輸出是**正確的**，而且已經把我們這一階段要驗證的 Ring Buffer 核心行為證明了。
+
+### 目前確認的結果
+
+**1. 四個 Buffer 確實循環使用**
+
+每次都是：
+
+```text
+write=1 → 2 → 3 → 0
+```
+
+代表：
+
+```text
+Buffer 0
+Buffer 1
+Buffer 2
+Buffer 3
+→ 再回到 Buffer 0
+```
+
+而且 `read` 也依序：
+
+```text
+read=0 → 1 → 2 → 3 → 0
+```
+
+這正是我們要的 FIFO Ring Buffer。
+
+---
+
+**2. 讀出的資料完全正確**
+
+例如第一輪：
+
+```text
+sequence=0 first_data=0
+sequence=1 first_data=1
+sequence=2 first_data=2
+sequence=3 first_data=3
+```
+
+第二輪：
+
+```text
+sequence=8 first_data=0
+sequence=9 first_data=1
+sequence=10 first_data=2
+sequence=11 first_data=3
+```
+
+這表示：
+
+* sequence number 持續遞增
+* EtherCAT data 沒有被錯誤覆蓋
+* Write → Read 順序正確
+* Ring Buffer 回繞後仍然正確
+
+---
+
+**3. Overflow 保護正確**
+
+```text
+Buffer filled: pending=4
+Write packet #5 : REJECTED (EXPECTED)
+pending=4
+```
+
+表示四個 Buffer 全滿時，第五筆資料**不會覆蓋舊資料**。
+
+這點非常重要，因為正式環境如果 SPI 暫時傳不出去，我們寧可回報 overflow，也不能偷偷把尚未傳送的 EtherCAT data 蓋掉。
+
+---
+
+**4. overflow counter 也正確**
+
+第一輪：
+
+```text
+overflow=1
+```
+
+第二輪：
+
+```text
+overflow=2
+```
+
+第三輪：
+
+```text
+overflow=3
+```
+
+第四輪：
+
+```text
+overflow=4
+```
+
+表示每次測試都確實發生一次「第五筆寫入被拒絕」，而 counter 持續累計。
+
+---
+
+### 有一個現象不用擔心
+
+sequence 沒有從 0 重新開始：
+
+```text
+第一輪：0~3
+第二輪：8~11
+第三輪：16~19
+第四輪：24~27
+```
+
+這是**正常的**。
+
+因為我們目前的 `HM_Init()` 只在開機時執行一次，並沒有每一輪測試重新初始化 sequence。
+
+而測試過程中除了 TEST 1 的 4 筆資料之外，TEST 3 的 overflow 測試與 cleanup 也會涉及寫入/讀取，因此 sequence 持續往前走是合理的。
+
+而且這反而符合正式環境：
+
+> **sequence number 應該代表整個 SPI 資料流的連續編號，而不是每次 Ring Buffer 測試重新從 0 開始。**
+
+---
+
+## 所以這一階段可以結案
+
+目前我們已經確認：
+
+```text
+EtherCAT data
+      ↓
+HM_WritePacket()
+      ↓
+┌────────┐
+│Buffer 0│
+├────────┤
+│Buffer 1│
+├────────┤
+│Buffer 2│
+├────────┤
+│Buffer 3│
+└────────┘
+      ↓
+HM_ReadPacket()
+      ↓
+SPI transmission（下一階段）
+```
+
+其中：
+
+* `write_pointer` ✅
+* `read_pointer` ✅
+* `pending count` ✅
+* FIFO 順序 ✅
+* Buffer 回繞 ✅
+* sequence number ✅
+* overflow protection ✅
+* overflow counter ✅
+* 資料完整性 ✅
+---
 
 
 
