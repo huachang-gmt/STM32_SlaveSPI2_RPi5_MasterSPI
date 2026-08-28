@@ -58,6 +58,8 @@ COM_InitTypeDef BspCOMInit;
 
 SPI_HandleTypeDef hspi2;
 
+DMA_HandleTypeDef hdma_spi2_tx;
+
 /* USER CODE BEGIN PV */
 
 
@@ -96,6 +98,7 @@ static uint8_t spi_test_data[HM_DATA_SIZE];
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_SPI2_Init(void);
+static void MX_DMA_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -169,6 +172,7 @@ Error_Handler();
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_SPI2_Init();
 
   /*
@@ -249,8 +253,35 @@ Error_Handler();
 
   while (1)
   {
+    static uint32_t last_test_tick = 0U;
+    uint32_t now = HAL_GetTick();
+
+    /*
+     * Test producer:
+     * generate one packet every 500 ms. 500U
+     * generate one packet every 1 ms. 1U
+     */
+    if ((now - last_test_tick) >= 1U)
+    {
+        last_test_tick = now;
+
+        (void)HM_WritePacket(
+            spi_test_data,
+            HM_DATA_SIZE);
+    }
+
+    /*
+     * Non-blocking SPI consumer:
+     *
+     * HM_Process() must be called continuously.
+     *
+     * It never waits for SPI completion.
+     */
+    (void)HM_Process();
 
 
+
+/*
     static uint32_t last_test_tick = 0U;
     uint32_t now = HAL_GetTick();
 
@@ -271,7 +302,7 @@ Error_Handler();
             (void)process_status;
         }
     }
-
+*/
 
 
     /* USER CODE END WHILE */
@@ -435,6 +466,16 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+
+static void MX_DMA_Init(void)
+{
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 2U, 0U);
+  HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+}
+
 
 /* USER CODE END 4 */
 

@@ -2423,4 +2423,281 @@ TxCount++
       ↓
 PE3 LOW
 ```
+---
+# [2026-08-28] 
+## 1.5MHz 以上 SPI Clock 會導致 傳輸失敗，如果採用 Non-Blocking 模式下。如果是 Blocking 模式下，2MHz 以上 SPI CLOCK 會導致傳輸失敗。
+
+> 在目前 STM32H755 SPI2 Slave 使用 interrupt-driven TX 的架構下，當 CM5 SPI Clock 提高到 2 MHz 時，STM32 的 TX interrupt servicing 無法及時持續補充 TXDR/FIFO，最終發生 SPI Underrun（UDR），使該 204-byte transaction 無法完整完成，因此 CM5 收到的資料不完整。目前這個「STM32H755 SPI2 Slave + HAL interrupt TX」的實作方式，在 2 MHz 下無法及時供應 SPI 資料。
+
+## 核心問題：
+
+> IRQ servicing latency / TXDR refill rate 不足，造成 SPI Slave TX underrun。
+
+### 今天的測試搭配 Raspberry Pi CM5 程式 spi_master_irq_16byte_test.cpp  static constexpr uint32_t SPI_SPEED_HZ = 1500000U
+---
+
+## 下一階段： 改用 HAL SPI TX DMA 方式傳送資料
+**測試結果**
+- Raspberry Pi CM5 SPI Clock 可以調高到 12MHz (SPI_SPEED_HZ = 12000000U; ) 沒問題。
+- 還是採用 Non-Blocking 方式傳遞資料。
+- 輸出狀況 ： 204 byte/1ms 
+
+```text
+herman@RPiCM5:~/spi-master-test $ ./spi_master_irq_16byte_test
+========================================
+CM5 SPI Master + GPIO25 Interrupt Test
+========================================
+GPIO chip : /dev/gpiochip0
+GPIO line : 25
+Edge      : RISING
+SPI device: /dev/spidev0.0
+SPI mode  : 0
+SPI speed : 12000000 Hz
+RX size   : 204 bytes
+========================================
+[SPI] Device       : /dev/spidev0.0
+[SPI] Mode         : 0
+[SPI] Bits         : 8
+[SPI] Speed        : 12000000 Hz
+========================================
+Waiting for STM32H755 PE3...
+========================================
+[1s] RX=1 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+
+```
+---
+
+特別說明「**1 ms 時間槽內，呼叫你的 function 後必須立即 return**」非常重要。
+
+---
+
+# 一、我理解的最終流程
+
+你同事未來有一個固定 **1 ms period** 的 EtherCAT 工作流程。
+
+概念上是：
+
+```text
+每 1 ms
+│
+├─ ① 同事執行 EtherCAT 工作
+│
+├─ ② 收到 EtherCAT data
+│
+├─ ③ 呼叫你的單一入口 function
+│      │
+│      │  ← 這裡把 data 交給你
+│      │
+│      └─ 你的 function
+│           │
+│           ├─ 把 data 放進 Ring Buffer
+│           │
+│           ├─ 如果 SPI idle
+│           │     └─ 啟動 SPI DMA
+│           │
+│           ├─ PE3 = HIGH
+│           │     └─ 通知 CM5
+│           │
+│           └─ 立即 return
+│
+├─ ④ 同事繼續執行 1 ms slot 裡面的其他工作
+│
+└─ ⑤ 絕對不能等 SPI 完成
+```
+
+這才是你的真正需求。
+
+也就是：
+
+> **你的 function call 的責任是「提交資料 + 啟動非同步傳輸」，不是「完成資料傳輸」。**
+
+---
+
+# 二、所以你說的 Non-Blocking，我們的定義應該是這個
+
+不是：
+
+> 「SPI 使用 interrupt/DMA，所以叫 non-blocking。」
+
+而是更嚴格的：
+
+> **同事呼叫你的 function 後，你的 function 必須在很短、可控的時間內返回，絕對不能等待 SPI clock、DMA、CM5 或 transmission complete。**
+
+例如：
+
+```text
+同事
+ │
+ │ HM_SendEtherCATData(data)
+ ▼
+你的 function
+ │
+ ├─ Ring Buffer copy
+ │
+ ├─ 判斷 SPI 是否 idle
+ │
+ ├─ HAL_SPI_Transmit_DMA()
+ │
+ ├─ PE3 HIGH
+ │
+ └─ return
+       │
+       ▼
+同事繼續工作
+```
+
+而：
+
+```text
+HAL_SPI_Transmit_DMA()
+```
+
+之後發生的事情：
+
+```text
+             DMA
+              │
+              ▼
+        SPI transmission
+              │
+              ▼
+       DMA interrupt
+              │
+              ▼
+HAL_SPI_TxCpltCallback()
+              │
+              ├─ PE3 LOW
+              │
+              └─ transaction complete
+```
+
+**完全不在同事的 1 ms function call 路徑上等待。**
+
+概念：
+
+```text
+                 ┌──────────────────────┐
+                 │ EtherCAT 1 ms Task   │
+                 └──────────┬───────────┘
+                            │
+                            │ data
+                            ▼
+                 ┌──────────────────────┐
+                 │ HM_SendEtherCATData()│
+                 │    SINGLE ENTRY      │
+                 └──────────┬───────────┘
+                            │
+                            ▼
+                    ┌───────────────┐
+                    │  Ring Buffer  │
+                    └───────┬───────┘
+                            │
+                            ▼
+                     SPI Engine
+                            │
+                     ┌──────┴──────┐
+                     │             │
+                   idle          busy
+                     │             │
+                     ▼             │
+              Start DMA            │
+                     │             │
+                  PE3 HIGH         │
+                     │             │
+                  return           │
+                                   │
+                                   ▼
+                              DMA complete
+                                   │
+                                   ▼
+                           HAL callback
+                                   │
+                                   ├─ PE3 LOW
+                                   │
+                                   └─ release slot
+```
+
+---
+
+而你的最終架構應該是：
+
+```text
+同事 1ms task
+       │
+       ▼
+HM_SendEtherCATData()
+       │
+       ├── copy → Ring Buffer
+       │
+       ├── 嘗試啟動 DMA
+       │
+       └── 立即 return
+```
+
+並且：
+
+```text
+HM_Process()
+```
+
+應該由**SPI transport layer 自己處理**，而不是讓你同事在他的 1 ms function 裡負責管理。
+
+---
+把架構鎖定成：
+
+```text
+                  同事 1ms function
+                         │
+                         │ EtherCAT data
+                         ▼
+               ┌──────────────────┐
+               │ Single Entry API │
+               │                  │
+               │ HM_Send...()     │
+               └────────┬─────────┘
+                        │
+                        ▼
+                  Ring Buffer
+                        │
+                        ▼
+                 SPI Transport
+                        │
+                 DMA non-blocking
+                        │
+                        ▼
+                      PE3 ↑
+                        │
+                        ▼
+                     CM5 SPI
+                        │
+                        ▼
+                   DMA complete
+                        │
+                        ▼
+                     PE3 ↓
+```
+
+而最關鍵的一句就是：
+
+> **同事呼叫你的 Single Entry API 後，你的 API 必須立即 return；SPI 是否完成與同事的 1 ms function 完全無關。**
+
+這就是我們接下來所有修改與驗證的判斷標準。
+
 

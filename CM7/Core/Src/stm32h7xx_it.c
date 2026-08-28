@@ -58,6 +58,7 @@
 
 /* USER CODE BEGIN EV */
 extern SPI_HandleTypeDef hspi2;
+extern DMA_HandleTypeDef hdma_spi2_tx;
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -219,5 +220,10 @@ void EXTI15_10_IRQHandler(void)
 void SPI2_IRQHandler(void)
 {
     HAL_SPI_IRQHandler(&hspi2);
+}
+
+void DMA1_Stream0_IRQHandler(void)
+{
+    HAL_DMA_IRQHandler(&hdma_spi2_tx);
 }
 /* USER CODE END 1 */

@@ -59,27 +59,6 @@ void SPI2_Slave_Init(void)
 #define SPI2_SLAVE_NOTIFY_PORT    CM5_TRIG_GPIO_Port
 #define SPI2_SLAVE_NOTIFY_PIN     CM5_TRIG_Pin
 
-/* ============================================================================
- * SPI2 Slave transmission state
- * ============================================================================
- *
- * 這些變數描述目前 SPI non-blocking transmission 的狀態。
- *
- * IMPORTANT：
- *
- *     目前 SPI 傳輸使用 HAL interrupt mode：
- *
- *         HAL_SPI_Transmit_IT()
- *
- *     因此 SPI2_Slave_SendPacket() 不會等待整筆資料傳送完成。
- *
- *     真正完成時，由 HAL callback：
- *
- *         HAL_SPI_TxCpltCallback()
- *
- *     通知我們。
- */
-
 /*
  * SPI transmission currently active。
  *
@@ -120,33 +99,11 @@ volatile uint32_t SPI2_SlaveTxBusyCount = 0U;
 volatile uint32_t SPI2_SlaveTxHalErrorCount = 0U;
 
 volatile uint32_t SPI2_SlaveLastHalError = 0U;
-
+volatile uint32_t SPI2_SlaveDmaTxCpltCount = 0U;
 
 /* ============================================================================
  * SPI2 Slave Send Packet
  * ============================================================================
- *
- * NON-BLOCKING VERSION
- *
- * 呼叫流程：
- *
- *     HM
- *      ↓
- *     SPI2_Slave_SendPacket()
- *      ↓
- *     PE3 HIGH
- *      ↓
- *     HAL_SPI_Transmit_IT()
- *      ↓
- *     立即 return
- *
- * SPI 硬體透過 interrupt 持續傳送資料。
- *
- * 傳送完成後：
- *
- *     HAL_SPI_TxCpltCallback()
- *          ↓
- *     PE3 LOW
  */
 
 HAL_StatusTypeDef SPI2_Slave_SendPacket(const uint8_t *data,
@@ -203,7 +160,7 @@ HAL_StatusTypeDef SPI2_Slave_SendPacket(const uint8_t *data,
     * must be ready before notifying CM5.
     */
     status =
-        HAL_SPI_Transmit_IT(&hspi2,
+        HAL_SPI_Transmit_DMA(&hspi2,
                             (uint8_t *)data,
                             length);
 
@@ -281,6 +238,7 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
         return;
     }
 
+    SPI2_SlaveDmaTxCpltCount++;
 
     /*
      * SPI transmission completed。

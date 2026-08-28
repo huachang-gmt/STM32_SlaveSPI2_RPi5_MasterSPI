@@ -50,7 +50,7 @@
 
 /* External functions --------------------------------------------------------*/
 /* USER CODE BEGIN ExternalFunctions */
-
+extern DMA_HandleTypeDef hdma_spi2_tx;
 /* USER CODE END ExternalFunctions */
 
 /* USER CODE BEGIN 0 */
@@ -88,6 +88,24 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef* hspi)
   if(hspi->Instance==SPI2)
   {
     /* USER CODE BEGIN SPI2_MspInit 0 */
+
+    hdma_spi2_tx.Instance = DMA1_Stream0;
+    hdma_spi2_tx.Init.Request = DMA_REQUEST_SPI2_TX;
+    hdma_spi2_tx.Init.Direction = DMA_MEMORY_TO_PERIPH;
+    hdma_spi2_tx.Init.PeriphInc = DMA_PINC_DISABLE;
+    hdma_spi2_tx.Init.MemInc = DMA_MINC_ENABLE;
+    hdma_spi2_tx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    hdma_spi2_tx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+    hdma_spi2_tx.Init.Mode = DMA_NORMAL;
+    hdma_spi2_tx.Init.Priority = DMA_PRIORITY_VERY_HIGH;
+    hdma_spi2_tx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
+
+    if (HAL_DMA_Init(&hdma_spi2_tx) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    __HAL_LINKDMA(hspi, hdmatx, hdma_spi2_tx);    
 
     /* USER CODE END SPI2_MspInit 0 */
 
