@@ -61,6 +61,35 @@ SPI_HandleTypeDef hspi2;
 /* USER CODE BEGIN PV */
 
 
+/*
+ * ============================================================
+ * Non-Blocking SPI2 bring-up test data
+ * ============================================================
+ *
+ * HM_PACKET_SIZE = 204 bytes
+ * HM_SEQUENCE_SIZE = 2 bytes
+ * HM_DATA_SIZE = 202 bytes
+ *
+ * Byte 0~1:
+ *     HM 自動加入 16-bit sequence number
+ *
+ * Byte 2~203:
+ *     這裡提供固定的測試 pattern
+ *
+ * 測試 pattern：
+ *
+ *     Byte 2  = 0x00
+ *     Byte 3  = 0x01
+ *     ...
+ *     Byte 203 = 0xC9
+ *
+ * 目前 CM5 主要驗證 sequence，
+ * payload pattern 保留給後續驗證使用。
+ */
+static uint8_t spi_test_data[HM_DATA_SIZE];
+
+
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -141,6 +170,20 @@ Error_Handler();
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_SPI2_Init();
+
+  /*
+   * ============================================================
+   * SPI2 Slave interrupt initialization
+   * ============================================================
+   *
+   * SPI2 peripheral has already been initialized above.
+   *
+   * Enable the Cortex-M7 NVIC interrupt only after
+   * MX_SPI2_Init() has completed.
+   * ============================================================
+   */
+  SPI2_Slave_Init();
+
   /* USER CODE BEGIN 2 */
 
   /*
@@ -162,6 +205,22 @@ Error_Handler();
 
   /* USER CODE END 2 */
 
+
+  /*
+   * ============================================================
+   * Prepare Non-Blocking SPI2 test data
+   * ============================================================
+   *
+   * Fill the 202-byte EtherCAT application-data test area
+   * with a simple incremental pattern.
+   */
+  for (uint32_t i = 0U; i < HM_DATA_SIZE; i++)
+  {
+    spi_test_data[i] = (uint8_t)i;
+  }
+
+
+
   /* Initialize leds */
   BSP_LED_Init(LED_GREEN);
   BSP_LED_Init(LED_YELLOW);
@@ -181,10 +240,12 @@ Error_Handler();
     Error_Handler();
   }
 
+
   HAL_Delay(8000U);// 延後啟動，與 CM5 取得同步
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+
 
   while (1)
   {
@@ -193,485 +254,22 @@ Error_Handler();
     static uint32_t last_test_tick = 0U;
     uint32_t now = HAL_GetTick();
 
-    /*
-     * ================================================================
-     * STM32 HM Ring Buffer Unit Test
-     * ================================================================
-     *
-     * 目前尚未接入正式 EtherCAT application。
-     *
-     * 因此以下資料與測試流程全部屬於「模擬測試」。
-     *
-     * 測試週期：
-     *
-     *     每 1 秒執行一次
-     *
-     * TEST 1:
-     *     寫入 4 個 Ring Buffer
-     *
-     * TEST 2:
-     *     讀出 4 個 Ring Buffer
-     *
-     * TEST 3:
-     *     寫滿 4 個 Ring Buffer 後，
-     *     再寫入第 5 筆，驗證 overflow protection。
-     *
-     * 最後：
-     *     清除測試資料，確保下一輪測試從 pending=0 開始。
-     *
-     * 注意：
-     *
-     *     這裡不呼叫 HM_Process()。
-     *
-     *     因為 HM_Process() 目前會進入 blocking SPI
-     *     傳輸，而這一階段只驗證 Ring Buffer。
-     * ================================================================
-     */
-
-    //if ((now - last_test_tick) >= 1U)
-    if ((now - last_test_tick) >= 1000U)
+    if ((now - last_test_tick) >= 500U)
     {
         last_test_tick = now;
 
+        HAL_StatusTypeDef write_status;
+        HAL_StatusTypeDef process_status;
 
+        write_status =
+            HM_WritePacket(spi_test_data, HM_DATA_SIZE);
 
-        /*
-         * ====================================================================
-         * Test 1
-         *
-         * Write 4 packets.
-         *
-         * ====================================================================
-         */
-
-        printf("\r\n");
-        printf("========================================\r\n");
-        printf("HM Ring Buffer Test\r\n");
-        printf("========================================\r\n");
-
-        /*
-         * ============================================================
-         * TEST 1
-         *
-         * 模擬同事的 EtherCAT application。
-         *
-         * 同事未來會在自己的 1 ms timer / interrupt 流程中取得
-         * EtherCAT data，然後呼叫：
-         *
-         *     HM_WritePacket(ethercat_buffer, HM_DATA_SIZE);
-         *
-         * 目前尚未接入同事程式，
-         * 所以這裡使用 ethercat_buffer 模擬。
-         *
-         * 每一筆資料使用不同的 pattern，
-         * 方便後面的 TEST 2 驗證 FIFO 順序。
-         * ============================================================
-         */
-
-        printf("[TEST 1] Write 4 packets\r\n");
-
-
-        for (uint8_t packet_index = 0U;
-             packet_index < HM_RING_BUFFER_COUNT;
-             ++packet_index)
+        if (write_status == HAL_OK)
         {
+            process_status = HM_Process();
 
-
-        /*
-         * ============================================================
-         * 模擬 EtherCAT Producer
-         * ============================================================
-         *
-         * 目前尚未接入正式 EtherCAT application。
-         *
-         * 本區域模擬同事未來每 1 ms 從 EtherCAT
-         * 取得最新資料後，將資料交給 HM 模組。
-         *
-         * 注意：
-         *
-         *     ethercat_buffer 是「模擬同事自己的資料 buffer」。
-         *
-         *     正式整合時，這個 buffer 將由同事的
-         *     EtherCAT application 提供。
-         *
-         *     HM 模組完全不知道這個模擬 buffer 的存在。
-         * ============================================================
-         */
-
-        static uint8_t ethercat_buffer[HM_DATA_SIZE];
-
-
-        /*
-         * ------------------------------------------------------------
-         * 模擬 EtherCAT 資料
-         * ------------------------------------------------------------
-         *
-         * 目前建立：
-         *
-         *     00, 01, 02, ... , 201
-         *
-         * 共 202 bytes。
-         *
-         * 這只是為了模擬同事已經取得一筆
-         * EtherCAT application data。
-         *
-         * 正式整合時，本區域會被同事的 EtherCAT
-         * data acquisition code 取代。
-         */
-        for (uint16_t i = 0U; i < HM_DATA_SIZE; ++i)
-        {
-            //ethercat_buffer[i] = (uint8_t)i;// 這是施韋捷的 EtherCAT 資料 per 1ms 
-            ethercat_buffer[i] =
-                    (uint8_t)(packet_index + i);
+            (void)process_status;
         }
-
-
-        HAL_StatusTypeDef status =
-                HM_WritePacket(ethercat_buffer,
-                               sizeof(ethercat_buffer));
-
-
-            printf("  Write packet %u : %s\r\n",
-                   packet_index,
-                   (status == HAL_OK) ? "OK" : "FAIL");
-
-
-            printf("    write=%lu read=%lu pending=%lu\r\n",
-                   (unsigned long)HM_DebugGetWritePointer(),
-                   (unsigned long)HM_DebugGetReadPointer(),
-                   (unsigned long)HM_GetPendingCount());
-        }
-
-        /*
-         * ====================================================================
-         * Test 2
-         *
-         * Read 4 packets.
-         *
-         * ====================================================================
-         *
-         * 這裡真正呼叫 HM_Process()。
-         *
-         * 目前 HM_Process() 仍然使用 blocking SPI。
-         *
-         * 因此本測試不適合直接接 CM5。
-         *
-         * 為了純粹測試 Ring Buffer FIFO，
-         * 下一步我們需要提供一個「Debug Read」API，
-         * 不經過 SPI 就能取出 Ring Buffer packet。
-         *
-         * 因此目前先不要執行 HM_Process()。
-         */
-
-        printf("\r\n");
-        printf("[TEST 2] Read 4 packets\r\n");
-
-        /*
-        * ====================================================================
-        * 模擬 Ring Buffer Consumer
-        * ====================================================================
-        *
-        * 目前尚未接入正式 SPI transmission。
-        *
-        * 因此這裡不呼叫 HM_Process()。
-        *
-        * 改由 HM_DebugReadPacket()：
-        *
-        *     直接讀取 Ring Buffer
-        *     ↓
-        *     驗證 FIFO 順序
-        *     ↓
-        *     驗證 sequence number
-        *     ↓
-        *     驗證 EtherCAT 模擬資料
-        *
-        * 注意：
-        *
-        *     HM_DebugReadPacket() 只供目前單元測試使用。
-        *
-        * 正式整合時：
-        *
-        *     HM_Process()
-        *     ↓
-        *     SPI transmission
-        *
-        * 才是正式資料消費路徑。
-        * ====================================================================
-        */
-
-        {
-            uint8_t read_packet[HM_PACKET_SIZE];
-
-            for (uint8_t packet_index = 0U;
-                packet_index < HM_RING_BUFFER_COUNT;
-                ++packet_index)
-            {
-                HAL_StatusTypeDef status =
-                    HM_DebugReadPacket(read_packet,
-                                        sizeof(read_packet));
-
-
-                if (status != HAL_OK)
-                {
-                    printf("  Read packet %u : FAIL\r\n",
-                          packet_index);
-
-                    continue;
-                }
-
-
-                /*
-                * ------------------------------------------------------------
-                * 讀取 HM 自動加入的 16-bit sequence number。
-                *
-                * Byte 0 = LSB
-                * Byte 1 = MSB
-                * ------------------------------------------------------------
-                */
-
-                uint16_t sequence =
-                    (uint16_t)read_packet[0] |
-                    ((uint16_t)read_packet[1] << 8U);
-
-
-                /*
-                * ------------------------------------------------------------
-                * 驗證資料內容。
-                *
-                * 本次模擬資料：
-                *
-                *     packet 0:
-                *         00, 01, 02, ...
-                *
-                *     packet 1:
-                *         01, 02, 03, ...
-                *
-                *     packet 2:
-                *         02, 03, 04, ...
-                *
-                *     packet 3:
-                *         03, 04, 05, ...
-                *
-                * 因此 Byte 2 的值應該等於 packet_index。
-                * ------------------------------------------------------------
-                */
-
-                uint8_t expected_first_data =
-                    packet_index;
-
-
-                uint8_t data_ok =
-                    (read_packet[HM_SEQUENCE_SIZE] ==
-                    expected_first_data);
-
-
-                printf("  Read packet %u : %s\r\n",
-                      packet_index,
-                      data_ok ? "OK" : "DATA ERROR");
-
-
-                printf("    sequence=%u first_data=%u "
-                      "read=%lu pending=%lu\r\n",
-                      sequence,
-                      read_packet[HM_SEQUENCE_SIZE],
-                      (unsigned long)HM_DebugGetReadPointer(),
-                      (unsigned long)HM_GetPendingCount());
-            }
-        }
-
-
-        /*
-         * ============================================================
-         * TEST 3
-         *
-         * Overflow protection test。
-         *
-         * 重新寫入 4 筆資料，使 Ring Buffer 完全滿載。
-         *
-         * 然後嘗試寫入第 5 筆。
-         *
-         * 正確結果：
-         *
-         *     HAL_BUSY
-         *     pending = 4
-         *     overflow counter +1
-         *
-         * 注意：
-         *
-         *     第 5 筆絕對不能覆蓋前面尚未傳送的資料。
-         * ============================================================
-         */
-
-        printf("\r\n");
-        printf("[TEST 3] Overflow test\r\n");
-
-
-        /*
-         * ------------------------------------------------------------
-         * 先重新填滿 4 個 Ring Buffer。
-         *
-         * 這裡同樣使用模擬 EtherCAT data。
-         * ------------------------------------------------------------
-         */
-        for (uint8_t packet_index = 0U;
-             packet_index < HM_RING_BUFFER_COUNT;
-             ++packet_index)
-        {
-            uint8_t ethercat_buffer[HM_DATA_SIZE];
-
-
-            for (uint16_t i = 0U;
-                 i < HM_DATA_SIZE;
-                 ++i)
-            {
-                ethercat_buffer[i] =
-                    (uint8_t)(0xA0U + packet_index + i);
-            }
-
-
-            HM_WritePacket(ethercat_buffer,
-                           sizeof(ethercat_buffer));
-        }
-
-
-        printf("  Buffer filled: pending=%lu\r\n",
-               (unsigned long)HM_GetPendingCount());
-
-
-
-        /*
-         * ------------------------------------------------------------
-         * 模擬第五筆 EtherCAT data。
-         *
-         * 這一筆故意在 Ring Buffer 已滿時寫入。
-         *
-         * 這只是 overflow 測試資料，
-         * 不是真正 EtherCAT data。
-         * ------------------------------------------------------------
-         */
-
-
-        {
-            uint8_t ethercat_buffer[HM_DATA_SIZE];
-
-            /*
-             * 模擬第五筆 EtherCAT data。
-             *
-             * 此時四個 Ring Buffer 都應該已經 occupied。
-             */
-            for (uint16_t i = 0U; i < HM_DATA_SIZE; ++i)
-            {
-                ethercat_buffer[i] = 0xEEU;
-            }
-
-
-            HAL_StatusTypeDef status =
-                HM_WritePacket(ethercat_buffer,
-                               sizeof(ethercat_buffer));
-
-
-            printf("  Write packet #5 : %s\r\n",
-                   (status == HAL_BUSY) ? "REJECTED (EXPECTED)"
-                                        : "UNEXPECTED");
-
-
-            printf("  pending=%lu\r\n",
-                   (unsigned long)HM_GetPendingCount());
-
-
-            printf("  overflow=%lu\r\n",
-                   (unsigned long)HM_GetOverflowCount());
-        }
-
-        /*
-         * ============================================================
-         * TEST CLEANUP
-         *
-         * 將 TEST 3 填入的 4 筆測試資料讀出。
-         *
-         * 目的：
-         *
-         *     讓下一個 1 秒測試週期重新從：
-         *
-         *         pending = 0
-         *
-         *     開始。
-         *
-         * 這是單元測試專用的清理流程。
-         * 正式 EtherCAT application 不需要這段程式。
-         * ============================================================
-         */
-
-        {
-            uint8_t cleanup_packet[HM_PACKET_SIZE];
-
-
-            for (uint8_t i = 0U;
-                 i < HM_RING_BUFFER_COUNT;
-                 ++i)
-            {
-                HM_DebugReadPacket(cleanup_packet,
-                                    sizeof(cleanup_packet));
-            }
-
-
-            printf("  Cleanup: pending=%lu\r\n",
-                   (unsigned long)HM_GetPendingCount());
-        }
-
-
-        printf("========================================\r\n");
-    
-
-
-        /*
-         * ------------------------------------------------------------
-         * 將同事的 EtherCAT data 交給 HM Ring Buffer。
-         * ------------------------------------------------------------
-         *
-         * 同事只需要知道這一個 API。
-         *
-         * HM 內部負責：
-         *
-         *     - Ring Buffer
-         *     - sequence number
-         *     - write pointer
-         *     - overflow
-         *     - SPI transmission
-         */
-
-        /*
-        HAL_StatusTypeDef write_status =
-            HM_WritePacket(ethercat_buffer,
-                           sizeof(ethercat_buffer));
-
-
-        if (write_status != HAL_OK)
-        {            
-            BSP_LED_Toggle(LED_RED);
-        }
-        */
-
-        /*
-         * ============================================================
-         * HM transmission processing
-         * ============================================================
-         *
-         * 目前仍然使用既有 blocking SPI path。
-         *
-         * 下一階段才會改成 non-blocking。
-         * ============================================================
-         */
-
-        /*
-        HAL_StatusTypeDef tx_status = HM_Process();
-
-        if ((tx_status != HAL_OK) &&
-            (tx_status != HAL_BUSY))
-        {
-            BSP_LED_Toggle(LED_RED);
-        }
-        */
     }
 
 

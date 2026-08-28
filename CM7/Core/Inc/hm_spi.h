@@ -106,18 +106,22 @@ HAL_StatusTypeDef HM_WritePacket(const uint8_t *data,
 
 
 /**
- * @brief Process one committed packet.
- *
- * Current implementation still uses the existing blocking
- * SPI2_Slave_SendPacket() path.
- *
- * Non-blocking transmission will be implemented later.
+ * @brief Start transmission of one committed packet.
  *
  * @return
- *        HAL_OK      : packet transmitted successfully.
- *        HAL_BUSY    : no packet available.
- *        HAL_TIMEOUT : SPI timeout.
- *        HAL_ERROR   : SPI transmission failed.
+ *        HAL_OK   : SPI transmission was successfully started.
+ *        HAL_BUSY : No packet available or SPI is still busy.
+ *        HAL_ERROR: SPI transmission could not be started.
+ *
+ * @note
+ *        This function is NON-BLOCKING.
+ *
+ *        HAL_OK means that the SPI transmission has been started,
+ *        not that the packet has already been transmitted.
+ *
+ *        The Ring Buffer slot is released only after
+ *        HM_OnSpiTxComplete() is called from the SPI
+ *        transmit-complete callback.
  */
 HAL_StatusTypeDef HM_Process(void);
 
@@ -135,50 +139,16 @@ uint32_t HM_GetOverflowCount(void);
 
 
 /**
- * @brief Debug: Get current write pointer.
+ * @brief Notify HM that the current SPI packet has completed.
  *
- * 僅供 STM32 Ring Buffer 單元測試使用。
- * 正式 EtherCAT application 不需要使用。
+ * This function releases the Ring Buffer slot that was being
+ * transmitted and advances the read pointer.
+ *
+ * It must be called only after the SPI transmission has completed
+ * successfully.
  */
-uint32_t HM_DebugGetWritePointer(void);
+void HM_OnSpiTxComplete(void);
 
-
-/**
- * @brief Debug: Get current read pointer.
- *
- * 僅供 STM32 Ring Buffer 單元測試使用。
- * 正式 EtherCAT application 不需要使用。
- */
-uint32_t HM_DebugGetReadPointer(void);
-
-
-/**
- * @brief Debug: Read one packet directly from Ring Buffer.
- *
- * 僅供 STM32 Ring Buffer 單元測試使用。
- *
- * 本 API 不執行 SPI 傳輸。
- * 只會將目前 read_pointer 所指向的完整 packet
- * 複製到 caller 提供的 buffer，並釋放該 Ring Buffer slot。
- *
- * @param data
- *        Caller 提供的接收 buffer。
- *
- * @param length
- *        接收 buffer 大小。
- *
- * @return
- *        HAL_OK   : 成功讀出一筆 packet。
- *        HAL_BUSY : Ring Buffer 目前沒有資料。
- *        HAL_ERROR: 參數錯誤。
- *
- * @note
- *        此 API 僅為目前 Ring Buffer 自我測試使用。
- *        正式 EtherCAT application 不需要使用。
- */
-HAL_StatusTypeDef HM_DebugReadPacket(uint8_t *data,
-                                     uint16_t length);
-                                     
 
 #ifdef __cplusplus
 }

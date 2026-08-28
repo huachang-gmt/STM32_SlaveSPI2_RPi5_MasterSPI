@@ -207,7 +207,6 @@ HAL_StatusTypeDef HM_WritePacket(const uint8_t *data,
      */
     hm_count++;
 
-
     /*
      * Move write pointer。
      */
@@ -228,24 +227,59 @@ HAL_StatusTypeDef HM_WritePacket(const uint8_t *data,
  * HM_Process
  * ============================================================================
  *
- * 目前：
+ * Non-blocking SPI transmission。
  *
- *     Ring Buffer
- *          ↓
+ * 重要：
+ *
+ *     SPI2_Slave_SendPacket() 回傳 HAL_OK
+ *     只代表 SPI transmission 已經「開始」。
+ *
+ *     並不代表 packet 已經傳送完成。
+ *
+ * 因此：
+ *
+ *     HM_Process()
+ *         ↓
  *     SPI2_Slave_SendPacket()
+ *         ↓
+ *     HAL_SPI_Transmit_IT()
+ *         ↓
+ *     return HAL_OK
  *
- * SPI2_Slave_SendPacket() 目前仍然是 blocking。
+ * 此時 Ring Buffer slot 仍然不能釋放。
  *
- * 下一階段再改成 non-blocking。
+ * 必須等 SPI transmission 完成後，
+ * 下一次 HM_Process() 才能確認前一筆 packet 已完成，
+ * 然後釋放 Ring Buffer slot。
+ *
+ * ============================================================================
  */
 
 HAL_StatusTypeDef HM_Process(void)
 {
     HAL_StatusTypeDef status;
 
+    const uint8_t *packet;
 
     /*
+     * ------------------------------------------------------------------------
+     * First consume a completed SPI transmission.
+     * ------------------------------------------------------------------------
+     *
+     * HAL_SPI_TxCpltCallback() only reports that the SPI transmission
+     * has completed.
+     *
+     * The Ring Buffer slot is released here.
+     */
+    if (SPI2_Slave_ConsumeTxComplete() != 0U)
+    {
+        HM_OnSpiTxComplete();
+    }
+
+    /*
+     * ------------------------------------------------------------------------
      * 沒有待傳送 packet。
+     * ------------------------------------------------------------------------
      */
     if (hm_count == 0U)
     {
@@ -254,26 +288,108 @@ HAL_StatusTypeDef HM_Process(void)
 
 
     /*
-     * 傳送最舊的 packet。
+     * ------------------------------------------------------------------------
+     * SPI transmission 尚未完成。
+     * ------------------------------------------------------------------------
+     *
+     * 上一筆 packet 仍然使用 read_pointer 所指向的 Ring Buffer slot。
+     *
+     * 絕對不能覆蓋這個 buffer。
+     * ------------------------------------------------------------------------
      */
-    status =
-        SPI2_Slave_SendPacket(
-            &hm_ring_buffer[hm_read_pointer][0],
-            HM_PACKET_SIZE);
-
-
-    /*
-     * 只有完整傳送成功才釋放 buffer。
-     */
-    if (status != HAL_OK)
+    if (SPI2_Slave_IsBusy() != 0U)
     {
-        return status;
+        return HAL_BUSY;
     }
 
 
     /*
-     * SPI transmission successful。
+     * ------------------------------------------------------------------------
+     * SPI 已經 idle。
+     *
+     * 如果上一筆 packet 已經傳送完成，
+     * 現在可以釋放上一個 Ring Buffer slot。
+     *
+     * 注意：
+     *
+     * 目前先由下一次 HM_Process() 的呼叫，
+     * 在確認 SPI idle 後完成 pointer/count 更新。
+     * ------------------------------------------------------------------------
      */
+
+     /*
+     * ------------------------------------------------------------------------
+     * Inspect the packet currently pointed to by read_pointer.
+     * ------------------------------------------------------------------------
+     */
+    packet = &hm_ring_buffer[hm_read_pointer][0];
+
+    
+    /*
+     * ------------------------------------------------------------------------
+     * Start non-blocking SPI transmission.
+     * ------------------------------------------------------------------------
+     */
+    status =
+        SPI2_Slave_SendPacket(
+            packet,
+            HM_PACKET_SIZE);
+
+    /*
+     * ------------------------------------------------------------------------
+     * SPI transmission successfully started。
+     * ------------------------------------------------------------------------
+     *
+     * IMPORTANT：
+     *
+     * 這裡不能立即：
+     *
+     *     hm_read_pointer++;
+     *     hm_count--;
+     *
+     * 因為 SPI transmission 此時還沒有完成。
+     *
+     * Ring Buffer slot 必須保持有效，
+     * 直到 HAL SPI transmission complete。
+     * ------------------------------------------------------------------------
+     */
+    if (status == HAL_OK)
+    {
+        return HAL_OK;
+    }
+
+
+    /*
+     * SPI transmission 沒有成功開始。
+     *
+     * Ring Buffer packet 仍然保留，
+     * 因此不能移動 read_pointer，
+     * 也不能減少 hm_count。
+     */
+    return status;
+}
+
+
+/*
+ * ============================================================================
+ * HM_OnSpiTxComplete
+ * ============================================================================
+ *
+ * Called when SPI2 transmission of the current Ring Buffer packet
+ * has completed successfully.
+ *
+ * SPI transmission completion is the only point at which the
+ * current Ring Buffer slot may be released.
+ * ============================================================================
+ */
+
+void HM_OnSpiTxComplete(void)
+{
+    if (hm_count == 0U)
+    {
+        return;
+    }
+
     hm_read_pointer++;
 
     if (hm_read_pointer >= HM_RING_BUFFER_COUNT)
@@ -281,11 +397,7 @@ HAL_StatusTypeDef HM_Process(void)
         hm_read_pointer = 0U;
     }
 
-
     hm_count--;
-
-
-    return HAL_OK;
 }
 
 
@@ -312,129 +424,5 @@ uint32_t HM_GetOverflowCount(void)
     return hm_overflow_count;
 }
 
-
-/*
- * ============================================================================
- * Debug: Ring Buffer state
- * ============================================================================
- *
- * 以下 API 僅供目前 STM32 Ring Buffer 單元測試使用。
- *
- * 正式 EtherCAT application 不應該依賴這些 API。
- */
-
-
-/**
- * @brief Return current write pointer.
- */
-uint32_t HM_DebugGetWritePointer(void)
-{
-    return hm_write_pointer;
-}
-
-
-/**
- * @brief Return current read pointer.
- */
-uint32_t HM_DebugGetReadPointer(void)
-{
-    return hm_read_pointer;
-}
-
-
-/**
- * @brief Debug: Read one packet directly from Ring Buffer.
- *
- * ================================================================
- * 模擬測試用途
- * ================================================================
- *
- * 目前尚未接入正式 SPI transmission。
- *
- * 因此這個 API 用來模擬：
- *
- *     SPI transmission consumer
- *             ↓
- *     從 Ring Buffer 取出最舊 packet
- *
- * 本 API 不會：
- *
- *     - 操作 SPI
- *     - 操作 PE3
- *     - 呼叫 SPI2_Slave_SendPacket()
- *
- * 只驗證 Ring Buffer 本身的 FIFO 讀取功能。
- *
- * 正式整合時：
- *
- *     HM_Process()
- *
- * 才會負責真正的 SPI transmission。
- */
-HAL_StatusTypeDef HM_DebugReadPacket(uint8_t *data,
-                                     uint16_t length)
-{
-    /*
-     * ------------------------------------------------------------
-     * Parameter validation
-     * ------------------------------------------------------------
-     */
-    if ((data == NULL) ||
-        (length != HM_PACKET_SIZE))
-    {
-        return HAL_ERROR;
-    }
-
-
-    /*
-     * ------------------------------------------------------------
-     * Check whether Ring Buffer has data.
-     * ------------------------------------------------------------
-     *
-     * hm_count == 0：
-     *
-     *     Ring Buffer EMPTY
-     */
-    if (hm_count == 0U)
-    {
-        return HAL_BUSY;
-    }
-
-
-    /*
-     * ------------------------------------------------------------
-     * Copy the oldest packet.
-     * ------------------------------------------------------------
-     *
-     * read_pointer 永遠指向：
-     *
-     *     最舊、下一個應該被讀出的 packet。
-     */
-    memcpy(data,
-           &hm_ring_buffer[hm_read_pointer][0],
-           HM_PACKET_SIZE);
-
-
-    /*
-     * ------------------------------------------------------------
-     * Release current Ring Buffer slot.
-     * ------------------------------------------------------------
-     */
-    hm_read_pointer++;
-
-    if (hm_read_pointer >= HM_RING_BUFFER_COUNT)
-    {
-        hm_read_pointer = 0U;
-    }
-
-
-    /*
-     * One packet has been removed from Ring Buffer.
-     */
-    hm_count--;
-
-
-    return HAL_OK;
-}
 
 

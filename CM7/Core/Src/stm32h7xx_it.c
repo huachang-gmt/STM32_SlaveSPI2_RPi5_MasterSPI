@@ -57,7 +57,7 @@
 /* External variables --------------------------------------------------------*/
 
 /* USER CODE BEGIN EV */
-
+extern SPI_HandleTypeDef hspi2;
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -213,5 +213,11 @@ void EXTI15_10_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-
+/**
+  * @brief This function handles SPI2 global interrupt.
+  */
+void SPI2_IRQHandler(void)
+{
+    HAL_SPI_IRQHandler(&hspi2);
+}
 /* USER CODE END 1 */

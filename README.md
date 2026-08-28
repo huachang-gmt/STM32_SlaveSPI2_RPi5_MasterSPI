@@ -1701,7 +1701,7 @@ CM7
 > PE3 → GPIO25 IRQ → CM5 SPI Master → STM32 SPI Slave → 16 bytes → sequence verification  
 
 # 更新版本
-## [2026-08-26] 修改檔案 spi_master_irq_16byte_test.cpp
+## [2026-08-26]
 ### 修改原因： 增加 四個 Ring Buffer，並增加 寫入與讀出和 溢出 的測試程式。
 
 ## 輸出結果 ： (由 COM PORT)
@@ -1998,6 +1998,429 @@ SPI transmission（下一階段）
 * 資料完整性 ✅
 ---
 
+# 更新版本
+## [2026-08-27]
+### 修改原因： 將原本設計 阻塞式 資料傳送，修改為 非阻塞式傳送
 
+### 說明
 
+## 1. 你描述的情境就是非阻塞的典型用途
+
+你同事未來的程式大概會是：
+
+```c
+void Timer_1ms_Callback(void)
+{
+    /* 同事的 EtherCAT / 其他處理 */
+
+    uint8_t ethercat_data[204];
+
+    /* 取得這 1 ms 的 EtherCAT 資料 */
+
+    HM_SPI_Send(ethercat_data, 204);
+
+    /* 這裡還有同事其他重要工作 */
+
+    Other_Task_1();
+
+    Other_Task_2();
+
+    Other_Task_3();
+}
+```
+
+你提供的：
+
+```c
+HM_SPI_Send()
+```
+
+**絕對不能變成：**
+
+```text
+HM_SPI_Send()
+    ↓
+等待 SPI 完成
+    ↓
+204 bytes 全部送完
+    ↓
+return
+    ↓
+同事的 Other_Task_1()
+```
+
+因為那就又回到 blocking。
+
+---
+
+# 2. Blocking 和 Non-blocking 的真正差別
+
+你說：
+
+> 只要資料送出去，主控權就可以交給其他應用程式執行
+
+這個方向是對的，但更精確地說：
+
+### Blocking
+
+```text
+同事 Timer
+    │
+    ▼
+你的 function call
+    │
+    ├── ARM SPI
+    ├── 等待 CM5
+    ├── 等 CS
+    ├── 等 SCK
+    ├── 傳 204 bytes
+    ├── 等 SPI 完成
+    │
+    ▼
+return
+    │
+    ▼
+同事繼續執行
+```
+
+所以：
+
+> **你的 function call 佔住了呼叫者。**
+
+---
+
+### Non-blocking
+
+應該變成：
+
+```text
+同事 Timer
+    │
+    ▼
+你的 function call
+    │
+    ├── 檢查狀態
+    ├── 保存/取得 204 bytes
+    ├── ARM SPI
+    ├── 啟動傳輸
+    └── 立即 return
+             │
+             ▼
+       同事繼續執行
+       Other_Task_1()
+       Other_Task_2()
+       Other_Task_3()
+```
+
+而 SPI 真正的傳輸：
+
+```text
+                    ┌──────────────────────┐
+                    │ SPI Hardware         │
+                    │                      │
+                    │ CM5 SCK              │
+                    │       ↓              │
+                    │ TX ISR               │
+                    │       ↓              │
+                    │ 204 bytes            │
+                    │       ↓              │
+                    │ Transfer Complete    │
+                    └──────────────────────┘
+                              │
+                              ▼
+                         Callback / ISR
+```
+
+**這部分不需要同事的 timer function 一直等。**
+
+這就是我們要的架構。
+
+---
+
+# 3. 但是你說「只要資料送出去」有一個地方要稍微修正
+
+不是：
+
+> 「只要資料送出去，function 就可以 return。」
+
+而是：
+
+> **「只要 SPI 傳輸已經被正確 ARM，並且資料 buffer 的生命週期已經被安全管理，function 就可以 return。」**
+
+這一點非常重要。
+
+例如：
+
+```c
+void MySend(const uint8_t *data)
+{
+    HAL_SPI_Transmit_IT(&hspi2,
+                       (uint8_t *)data,
+                       204);
+
+    return;
+}
+```
+
+看起來是 non-blocking。
+
+但是如果：
+
+```c
+void TimerCallback(void)
+{
+    uint8_t data[204];
+
+    FillData(data);
+
+    MySend(data);
+
+    /* return 後 data 不存在了 */
+}
+```
+
+那就有問題。
+
+因為 SPI ISR 還沒傳完：
+
+```text
+TimerCallback return
+       ↓
+data buffer 生命週期結束
+       ↓
+SPI ISR 還在使用 data
+       ↓
+錯誤
+```
+
+概念上：
+
+```text
+同事 Timer
+     │
+     │ 204 bytes
+     ▼
+┌──────────────┐
+│ HM Ring      │
+│              │
+│ slot 0       │
+│ slot 1       │
+│ slot 2       │
+│ slot 3       │
+└──────────────┘
+     │
+     ▼
+SPI
+     │
+     │ 非阻塞
+     ▼
+ISR
+     │
+     ▼
+COMPLETE
+     │
+     ▼
+RELEASE slot
+```
+
+所以：
+
+### 同事的 204-byte buffer
+
+和
+
+### SPI 正在使用的 buffer
+
+最好不要直接綁死在一起。
+
+HM ring buffer 就是用來處理這個 ownership 問題。
+
+---
+
+# 5. 而且這也讓「每 1 ms」的真正需求變得很清楚
+
+同事：
+
+```text
+t = 0 ms
+    ↓
+送第 0 筆 204 bytes
+    ↓
+你的 function return
+
+t = 1 ms
+    ↓
+送第 1 筆 204 bytes
+    ↓
+你的 function return
+
+t = 2 ms
+    ↓
+送第 2 筆
+    ↓
+return
+```
+
+而 SPI 實際上可能是：
+
+```text
+t = 0.000 ms
+ARM packet 0
+PE3 HIGH
+
+t = 0.050 ms
+CM5 開始 SCK
+
+t = 0.866 ms
+2 MHz → 204 bytes 完成
+
+t = 0.866 ms
+SPI COMPLETE
+PE3 LOW
+
+t = 1.000 ms
+packet 1
+```
+
+這才是我們真正想要的。
+
+---
+
+# 6. 但是這裡出現一個非常重要的設計問題
+
+假設：
+
+```text
+2 MHz
+204 bytes
+```
+
+需要：
+
+```text
+204 × 8 / 2,000,000
+= 816 µs
+```
+
+所以理論上：
+
+```text
+1 ms producer period
+>
+816 µs SPI transfer time
+```
+
+有約：
+
+```text
+184 µs
+```
+
+的 margin。
+
+**所以 2 MHz 在純 SPI bandwidth 上完全合理。**
+
+這更加支持你的觀點：
+
+> **2 MHz 本身不是問題。**
+
+我們應該查的是：
+
+```text
+ARM
+ ↓
+PE3
+ ↓
+CM5 GPIO interrupt
+ ↓
+CS
+ ↓
+SCK
+ ↓
+SPI TX ISR
+```
+
+這條時間鏈。
+
+---
+
+最後要達到：
+
+```text
+                同事 1ms Timer
+                       │
+                       ▼
+              Your_SPI_Send()
+                       │
+                       │ return immediately
+                       ▼
+             同事其他程式繼續
+                       │
+                       │
+                       │
+                       │
+                       ▼
+              ┌────────────────┐
+              │ HM Ring Buffer │
+              └───────┬────────┘
+                      │
+                      ▼
+                ARM SPI2 TX
+                      │
+                      ▼
+                  PE3 HIGH
+                      │
+                      ▼
+                 CM5 GPIO25
+                      │
+                      ▼
+                 CM5 SPI 2MHz
+                      │
+                      ▼
+              SPI2 TX interrupt
+                      │
+                      ▼
+                204 bytes done
+                      │
+                      ▼
+                SPI COMPLETE
+                      │
+                      ▼
+                  PE3 LOW
+                      │
+                      ▼
+                Release slot
+```
+
+---
+
+> 在目前這個測試架構下，CM5 SPI = 1 MHz 時，non-blocking SPI transmission 已經被實驗證明可以正常工作。
+
+```text
+HM_WritePacket()
+      ↓
+HM_Process()
+      ↓
+SPI2_Slave_SendPacket()
+      ↓
+HAL_SPI_Transmit_IT()
+      ↓
+立即返回
+      ↓
+PE3 HIGH
+      ↓
+CM5 GPIO25 RISING
+      ↓
+CM5 SPI Master 送出 204 bytes
+      ↓
+STM32 SPI2 IRQ
+      ↓
+HAL_SPI_IRQHandler()
+      ↓
+HAL_SPI_TxCpltCallback()
+      ↓
+TxCount++
+      ↓
+PE3 LOW
+```
 
