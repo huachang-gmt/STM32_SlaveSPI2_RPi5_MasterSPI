@@ -2950,9 +2950,9 @@ return
 
 ## 示波器 圖
 
-![OSC_Pluse_1](images/OSC_Pluse_1.png)
-![OSC_Pluse_2](images/OSC_Pluse_2.png)
-![OSC_Pluse_3](images/OSC_Pluse_3.png)
+![OSC_Pluse_1](images/OSC_Pluse_1.jpg)
+![OSC_Pluse_2](images/OSC_Pluse_2.jpg)
+![OSC_Pluse_3](images/OSC_Pluse_3.jpg)
 
 * 從示波器圖可以看到 紅色波形是 PE2 腳位輸出，代表 執行 HM_SendPacket() 花費時間，也就是佔用主控權時間。從高電位降到低電位之後，主控權可以交還。
 * 黃色波形 是 PE3 腳位，代表透過 DMA Controller 傳輸 204 Byte 傳輸給 Raspberry Pi CM5 所花費的時間，這是背景執行，不佔用程式主控權。
