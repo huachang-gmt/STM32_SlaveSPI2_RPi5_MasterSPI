@@ -62,8 +62,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define CM5_TRIG_Pin GPIO_PIN_3
 #define CM5_TRIG_GPIO_Port GPIOE
-#define SPI2_CS_Pin GPIO_PIN_14
-#define SPI2_CS_GPIO_Port GPIOD
+#define SPI2_CS_Pin GPIO_PIN_4
+#define SPI2_CS_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
