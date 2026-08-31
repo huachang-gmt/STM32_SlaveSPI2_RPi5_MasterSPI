@@ -1,5 +1,5 @@
 #include "spi2_slave.h"
-#include <stdio.h>
+#include "hm_spi.h"
 
 /* ============================================================================
  * External SPI2 handle
@@ -28,7 +28,7 @@ void SPI2_Slave_Init(void)
     /*
      * Configure SPI2 interrupt priority.
      *
-     * Priority 5 is intentionally used for the current bring-up
+     * Priority 2 is intentionally used for the current bring-up
      * stage. It provides normal interrupt service without giving
      * SPI2 an unnecessarily high priority over time-critical
      * system interrupts.
@@ -66,22 +66,6 @@ void SPI2_Slave_Init(void)
  * 1 = transmitting
  */
 static volatile uint8_t spi2_slave_tx_busy = 0U;
-
-
-/*
- * SPI transmission completed successfully.
- *
- * 0 = no completed transmission pending
- * 1 = current transmission completed
- *
- * This flag is set by HAL_SPI_TxCpltCallback().
- *
- * The application consumes this flag through:
- *
- *     SPI2_Slave_ConsumeTxComplete()
- */
-static volatile uint8_t spi2_slave_tx_complete = 0U;
-
 
 /* ============================================================================
  * Debug counters
@@ -122,37 +106,18 @@ HAL_StatusTypeDef SPI2_Slave_SendPacket(const uint8_t *data,
         return HAL_ERROR;
     }
 
-    /*
-     * ------------------------------------------------------------------------
-     * Check whether SPI2 is already transmitting.
-     * ------------------------------------------------------------------------
-     *
-     * non-blocking 模式下：
-     *
-     *     不能在上一筆 packet 尚未完成時，
-     *     又開始另一筆 SPI transmission。
-     */
-    if ((spi2_slave_tx_busy != 0U) ||
-        (spi2_slave_tx_complete != 0U))
+    if (spi2_slave_tx_busy != 0U)
     {
         SPI2_SlaveTxBusyCount++;
 
         return HAL_BUSY;
     }
-
-
-    /*
-    * A new transmission is starting.
-    *
-    * Clear any previous completion notification and
-    * mark SPI2 as busy before starting the HAL transfer.
-    */
-    spi2_slave_tx_complete = 0U;
+    
     spi2_slave_tx_busy = 1U;
 
 
     /*
-    * Start SPI transmission in interrupt mode first.
+    * Start SPI transmission in DMA mode.
     *
     * IMPORTANT:
     *
@@ -172,7 +137,6 @@ HAL_StatusTypeDef SPI2_Slave_SendPacket(const uint8_t *data,
     if (status != HAL_OK)
     {
         spi2_slave_tx_busy = 0U;
-        spi2_slave_tx_complete = 0U;
 
         SPI2_SlaveErrorCount++;
 
@@ -240,36 +204,23 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 
     SPI2_SlaveDmaTxCpltCount++;
 
-    /*
-     * SPI transmission completed。
-     */
     spi2_slave_tx_busy = 0U;
 
     /*
-    * Record successful transmission completion.
+    * Release CM5 notification first.
     *
-    * HM_Process() will consume this flag and release
-    * the corresponding Ring Buffer slot.
+    * PE3 HIGH -> LOW
     */
-    spi2_slave_tx_complete = 1U;
-
+    HAL_GPIO_WritePin(SPI2_SLAVE_NOTIFY_PORT,
+                  SPI2_SLAVE_NOTIFY_PIN,
+                  GPIO_PIN_RESET);   
 
     /*
      * Packet transmission successful。
      */
     SPI2_SlaveTxCount++;
 
-
-    /*
-     * Release CM5 notification。
-     *
-     * PE3 HIGH -> LOW
-     *
-     * 表示這一筆 SPI transaction 已經完成。
-     */
-    HAL_GPIO_WritePin(SPI2_SLAVE_NOTIFY_PORT,
-                      SPI2_SLAVE_NOTIFY_PIN,
-                      GPIO_PIN_RESET);
+    HM_OnSpiTxComplete();
 
 }
 
@@ -278,7 +229,7 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
  * HAL SPI Error Callback
  * ============================================================================
  *
- * SPI interrupt transmission 發生錯誤時，
+ * SPI DMA transmission 發生錯誤時，
  * HAL 會呼叫這個 callback。
  */
 
@@ -304,7 +255,6 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
      * SPI transmission failed。
      */
     spi2_slave_tx_busy = 0U;
-    spi2_slave_tx_complete = 0U;
 
 
     SPI2_SlaveErrorCount++;
@@ -338,43 +288,6 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
 
 uint8_t SPI2_Slave_IsBusy(void)
 {
-    if ((spi2_slave_tx_busy != 0U) ||
-        (spi2_slave_tx_complete != 0U))
-    {
-        return 1U;
-    }
-
-    return 0U;
+    return spi2_slave_tx_busy;
 }
 
-
-/* ============================================================================
- * SPI2 Slave Transmission Complete
- * ============================================================================
- *
- * Return and consume the successful transmission-complete notification.
- *
- * This function is intentionally implemented as a "consume" operation:
- *
- *     1 = one completed transmission was waiting
- *
- * After returning 1, the completion flag is cleared.
- *
- *     0 = no completed transmission is waiting
- *
- * This prevents HM_Process() from processing the same completion
- * more than once.
- * ============================================================================ */
-
-uint8_t SPI2_Slave_ConsumeTxComplete(void)
-{
-    if (spi2_slave_tx_complete == 0U)
-    {
-        return 0U;
-    }
-
-
-    spi2_slave_tx_complete = 0U;
-
-    return 1U;
-}

@@ -2700,4 +2700,790 @@ HM_Process()
 
 這就是我們接下來所有修改與驗證的判斷標準。
 
+> 我用示波器量測 PE3，高電位時間約 0.24ms 。也就是說，資料 204 byte 傳送只需要 0.24ms 。在 SPI clock 為 12MHz 情況下，由 Raspberry Pi CM5 當作 SPI Master 。
 
+**約 0.24 ms（240 µs）是合理的，而且目前這個結果反而很符合我們現在的架構。**
+
+你目前條件：
+
+* SPI Clock：**12 MHz**
+* Packet：**204 bytes**
+* 純 SPI bit 傳輸時間：**136 µs**
+* PE3 HIGH：**約 240 µs**
+
+### 為什麼 PE3 不是只有 136 µs？
+
+你的程式是：
+
+```text
+SPI2_Slave_SendPacket()
+        │
+        ├─ HAL_SPI_Transmit_DMA()
+        │
+        └─ PE3 = HIGH
+              │
+              │ CM5 收到 GPIO25 rising
+              │
+              │ spidev 啟動 SPI transaction
+              │
+              │ 204 bytes × 8 / 12 MHz
+              │ ≈ 136 µs
+              │
+              ▼
+        SPI DMA 完成
+              │
+              ▼
+HAL_SPI_TxCpltCallback()
+        │
+        └─ PE3 = LOW
+```
+
+因此 PE3 HIGH 的時間實際包含：
+
+```text
+PE3 HIGH
+│
+├── CM5 GPIO interrupt/event latency
+├── userspace 程式被喚醒
+├── ioctl(SPI_IOC_MESSAGE)
+├── Linux SPI driver / spidev latency
+├── CS 開始
+├── 204 bytes SPI transmission ≈ 136 µs
+└── transaction 完成 → STM32 callback → PE3 LOW
+```
+
+---
+
+## 更重要的是：這個示波器結果支持我們目前的設計
+
+你現在可以把它理解成：
+
+```text
+1 ms period
+┌──────────────────────────────────────────────┐
+│                                              │
+│ PE3 HIGH                                     │
+│ ┌──────────────────────┐                     │
+│ │       ~240 µs        │                     │
+│ └──────────────────────┘                     │
+│                                              │
+│                         其餘 ~760 µs          │
+│                                              │
+└──────────────────────────────────────────────┘
+```
+
+而真正 SPI SCK 有效傳輸約：
+
+```text
+204 bytes × 8 / 12 MHz = 136 µs
+```
+
+所以目前 **240 µs PE3 HIGH 並不是代表 STM32 CPU 被 blocking 240 µs**。
+
+這一點非常重要。
+
+你的 `HAL_SPI_Transmit_DMA()` 已經啟動 DMA 後就返回，因此 CPU 可以繼續執行同事的後續工作；PE3 只是維持 HIGH，表示：
+
+> **「這一筆 packet 還沒有完成，CM5 不要再啟動下一筆。」**
+
+---
+
+## Non-Blocking + DMA 架構的核心目的
+
+你量到的：
+
+> **PE3 HIGH 約 0.24 ms = 約 240 µs**
+
+代表的是「從通知 CM5 開始，到這一筆 SPI transaction 完成」的整體時間，**不是你的傳送 function 被卡住 240 µs**。
+
+實際流程是：
+
+```text
+同事的 1 ms function
+        │
+        │ 收到 EtherCAT 204 bytes
+        ▼
+你的 function
+        │
+        ├─ HM_WritePacket()
+        │
+        ├─ HM_Process()
+        │      │
+        │      └─ HAL_SPI_Transmit_DMA()
+        │                 │
+        │                 └── DMA 開始背景傳輸
+        │
+        └──────────────► 立即 return
+                              │
+                              ▼
+                       回到同事的程式
+                              │
+                              ├─ 其他工作
+                              │
+                              ├─ 其他工作
+                              │
+                              └─ 1 ms function 結束
+```
+
+而在**背景**：
+
+```text
+CPU
+│
+├── 呼叫 HAL_SPI_Transmit_DMA()
+│
+├── return
+│
+├── 繼續執行同事的程式
+│
+└── 做其他工作
+
+DMA + SPI
+│
+└────── 傳送 204 bytes ──────►
+          約 136 µs
+          （12 MHz 純 SPI）
+                 │
+                 ▼
+          DMA 完成 interrupt
+                 │
+                 ▼
+        HAL_SPI_TxCpltCallback()
+                 │
+                 ▼
+             PE3 = LOW
+```
+
+所以你可以把兩個時間**明確分開**：
+
+### ① SPI 實際傳輸時間
+
+12 MHz、204 bytes：
+
+**約 136 µs**
+
+這是 SPI bus 真正搬資料所需要的時間。
+
+### ② PE3 HIGH 的總時間
+
+你示波器看到：
+
+**約 240 µs**
+
+這包含：
+
+```text
+CM5 GPIO event
+    +
+Linux userspace wake-up
+    +
+spidev ioctl
+    +
+SPI driver
+    +
+SPI 204 bytes transmission
+    +
+DMA completion
+    +
+STM32 callback
+```
+
+所以是約 240 µs。
+
+### ③ 你的傳送 function 執行時間
+
+這才是你真正關心的。
+
+它不是 240 µs。
+
+你的 function 做的是：
+
+```text
+HM_WritePacket()
+       ↓
+HM_Process()
+       ↓
+HAL_SPI_Transmit_DMA()
+       ↓
+return
+```
+
+**DMA 啟動後，function 就可以返回。**
+
+因此你的同事不需要等：
+
+```text
+❌ 等待 240 µs
+❌ 等待 136 µs
+❌ 等待 SPI 完成
+```
+
+而是：
+
+```text
+✅ 啟動 DMA
+✅ 立即 return
+✅ 同事繼續執行後面的工作
+```
+
+---
+
+不過有一個很重要的精確說法：
+
+> **「傳送 function 被 call 後立刻繼續往下走」是我們目前設計的目標，也是 `HAL_SPI_Transmit_DMA()` 的語意；但要用示波器量 CPU-side GPIO，才能實驗性地證明實際 function return latency。**
+
+所以目前我們已經可以確認**架構上是 Non-Blocking**；下一步如果要把這件事情做成你可以放心交給同事合併的證據，我會建議直接量：
+
+**`HM_Process()` call 前 → return 後**
+
+而不是再看 PE3。
+
+這樣我們就能得到最關鍵的一個數字：
+
+> **「我的 SPI 傳送 function 到底花幾 µs 就把控制權還給同事？」**
+
+這才是你這次設計最重要的 KPI。
+
+---
+# [2026-08-31] 
+## 成功修改 建立單一入口 function call 提供 給 同事 合併使用。 亦即 1ms 內，同事的程式抓取 EtherCAT 資料，透過我的 function call - (void)HM_SendPacket(spi_test_data, HM_DATA_SIZE);  把 資料傳輸到 Raspberry Pi CM5 。
+
+## 示波器 圖
+
+![OSC_Pluse_1](images/OSC_Pluse_1.png)
+![OSC_Pluse_2](images/OSC_Pluse_2.png)
+![OSC_Pluse_3](images/OSC_Pluse_3.png)
+
+* 從示波器圖可以看到 紅色波形是 PE2 腳位輸出，代表 執行 HM_SendPacket() 花費時間，也就是佔用主控權時間。從高電位降到低電位之後，主控權可以交還。
+* 黃色波形 是 PE3 腳位，代表透過 DMA Controller 傳輸 204 Byte 傳輸給 Raspberry Pi CM5 所花費的時間，這是背景執行，不佔用程式主控權。
+
+```c
+ HAL_GPIO_WritePin(GPIOE, GPIO_PIN_2, GPIO_PIN_SET); << PE2
+
+(void)HM_SendPacket(
+    spi_test_data,
+    HM_DATA_SIZE);
+
+HAL_GPIO_WritePin(GPIOE, GPIO_PIN_2, GPIO_PIN_RESET);
+```
+
+
+# SPI2 DMA Non-Blocking Transmission Integration
+
+## 1. Development Objective
+
+本階段的目標，是將先前已驗證成功的 STM32H755 SPI2 Slave → Raspberry Pi CM5 SPI Master 傳輸架構，進一步整合成可提供給 EtherCAT application 使用的 **Non-Blocking SPI transmission interface**。
+
+核心要求：
+
+* EtherCAT application 每 1 ms 更新資料。
+
+* Application 只需要呼叫一個 API：
+
+  ```c
+  (void)HM_SendPacket(
+      ethercat_buffer,
+      HM_DATA_SIZE);
+  ```
+
+* Application 不需要知道 Ring Buffer 的存在。
+
+* Application 不需要處理 sequence number。
+
+* Application 不需要等待 SPI 傳輸完成。
+
+* SPI 傳輸交由 STM32 DMA Controller 在背景執行。
+
+* DMA 完成後才釋放 SPI notification。
+
+* 儘快將 CM7 CPU 主控權返回給 EtherCAT application。
+
+---
+
+## 2. Final Architecture
+
+目前 STM32H755 CM7 端採用：
+
+```text
+EtherCAT Application
+        |
+        | HM_SendPacket(data, length)
+        v
++-----------------------------+
+|          HM SPI             |
+|                             |
+|  Ring Buffer × 4            |
+|  Sequence Number            |
+|  Packet Management          |
++-----------------------------+
+        |
+        | SPI2_Slave_SendPacket()
+        v
++-----------------------------+
+|        STM32 SPI2           |
+|          Slave              |
++-----------------------------+
+        |
+        | DMA TX
+        v
++-----------------------------+
+|       DMA Controller        |
+|      DMA1 Stream 0          |
++-----------------------------+
+        |
+        | SPI transmission
+        v
+      CM5 SPI Master
+
+DMA Transfer Complete
+        |
+        v
+HAL_SPI_TxCpltCallback()
+        |
+        +--> PE3 LOW
+        |
+        +--> HM_OnSpiTxComplete()
+        |
+        +--> Release Ring Buffer slot
+```
+
+此架構將 EtherCAT application 與 SPI 傳輸細節完全分離。
+
+---
+
+## 3. Single Entry API
+
+正式提供給 EtherCAT application 的唯一入口為：
+
+```c
+HAL_StatusTypeDef HM_SendPacket(
+    const uint8_t *data,
+    uint16_t length);
+```
+
+目前測試資料大小：
+
+```c
+#define HM_PACKET_SIZE    204U
+#define HM_SEQUENCE_SIZE  2U
+#define HM_DATA_SIZE      202U
+```
+
+完整 SPI packet：
+
+```text
+Byte 0 ~ 1     : 16-bit sequence number
+Byte 2 ~ 203   : EtherCAT application data
+Total          : 204 bytes
+```
+
+Sequence number 由 HM SPI module 自動產生，application 不需要管理。
+
+---
+
+## 4. Ring Buffer
+
+HM SPI module 內部使用 4 個 Ring Buffer。
+
+Application 不需要知道：
+
+* write pointer
+* read pointer
+* packet count
+* sequence number
+* overflow counter
+* DMA transmission state
+
+Application 只負責提供 EtherCAT data buffer。
+
+Ring Buffer 的目的，是讓 application data production 與 SPI DMA transmission 解耦。
+
+當目前 SPI 傳輸尚未完成時，新資料可以繼續進入 Ring Buffer，而不需要等待前一筆 SPI transmission 完成。
+
+---
+
+## 5. DMA Non-Blocking Transmission
+
+SPI2 TX 使用：
+
+```text
+DMA1 Stream 0
+DMA_REQUEST_SPI2_TX
+DMA_MEMORY_TO_PERIPH
+```
+
+DMA 設定：
+
+```text
+Memory Increment       : Enable
+Peripheral Increment   : Disable
+Memory Alignment       : Byte
+Peripheral Alignment   : Byte
+Mode                   : Normal
+Priority               : Very High
+FIFO                   : Disable
+```
+
+`HM_SendPacket()` 不等待 DMA 完成。
+
+流程為：
+
+```text
+HM_SendPacket()
+    |
+    +-- Copy data into Ring Buffer
+    |
+    +-- Add sequence number
+    |
+    +-- Start SPI2 DMA
+    |
+    +-- Return immediately
+```
+
+SPI 傳輸完成後才由：
+
+```c
+HAL_SPI_TxCpltCallback()
+```
+
+處理完成事件。
+
+因此 EtherCAT application 不需要等待約 0.24 ms 的 SPI transmission time。
+
+---
+
+## 6. SPI Notification
+
+PE3 作為 CM5 的 packet-ready notification signal。
+
+傳輸流程：
+
+```text
+PE3 LOW
+    |
+    | HM_SendPacket()
+    v
+PE3 HIGH
+    |
+    | CM5 detects rising edge
+    |
+    | CM5 performs SPI transfer
+    |
+    | STM32 DMA completes
+    v
+PE3 LOW
+```
+
+DMA completion callback：
+
+```c
+void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if (hspi != &hspi2)
+    {
+        return;
+    }
+
+    SPI2_SlaveDmaTxCpltCount++;
+
+    spi2_slave_tx_busy = 0U;
+
+    HAL_GPIO_WritePin(
+        SPI2_SLAVE_NOTIFY_PORT,
+        SPI2_SLAVE_NOTIFY_PIN,
+        GPIO_PIN_RESET);
+
+    SPI2_SlaveTxCount++;
+
+    HM_OnSpiTxComplete();
+}
+```
+
+因此 PE3 的 LOW 不再依賴 CPU 等待 SPI 傳輸，而是在 DMA transmission 完成後由 callback 產生。
+
+---
+
+## 7. Hardware Validation
+
+### SPI Configuration
+
+```text
+SPI Device        : STM32H755 SPI2 Slave
+CM5 Device        : Raspberry Pi CM5 SPI Master
+SPI Mode          : Mode 0
+SPI Speed         : 12 MHz
+Packet Size       : 204 bytes
+```
+
+### CM5 Continuous Test
+
+實際測試結果：
+
+```text
+SPI speed : 12000000 Hz
+RX size   : 204 bytes
+
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1002 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1002 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1002 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1002 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+[1s] RX=1003 SPI_ERR=0 SEQ_ERR=0 LOST=0 DUP=0
+```
+
+驗證結果：
+
+```text
+SPI_ERR  = 0
+SEQ_ERR  = 0
+LOST     = 0
+DUP      = 0
+```
+
+代表目前 12 MHz SPI transmission 在連續傳輸測試中沒有觀察到資料錯誤、sequence loss 或 duplicate。
+
+---
+
+## 8. Oscilloscope Validation
+
+使用示波器同時觀察：
+
+```text
+PE2 : Test timing signal
+PE3 : CM5 packet notification
+```
+
+實測結果：
+
+```text
+PE2 HIGH duration ≈ 82 µs
+
+PE3 HIGH duration ≈ 0.24 ms
+```
+
+並觀察到：
+
+```text
+PE2 falling edge
+        |
+        +---- PE3 rising edge
+```
+
+兩者幾乎緊密銜接。
+
+PE3 約 0.24 ms 的 HIGH duration 與先前成功 DMA 傳輸版本的實測結果一致。
+
+此結果證明目前的流程為：
+
+```text
+Application / HM processing
+        |
+        v
+DMA transmission starts
+        |
+        v
+PE3 notification
+        |
+        v
+SPI transfer
+        |
+        v
+DMA completion
+        |
+        v
+PE3 LOW
+```
+
+符合 Non-Blocking DMA transmission 的設計目標。
+
+---
+
+## 9. Performance Result
+
+本階段最重要的實測結果：
+
+| Item              |                Result |
+| ----------------- | --------------------: |
+| SPI mode          |                Mode 0 |
+| SPI clock         |                12 MHz |
+| Packet size       |             204 bytes |
+| CM5 RX rate       | ≈ 1002~1003 packets/s |
+| SPI errors        |                     0 |
+| Sequence errors   |                     0 |
+| Lost packets      |                     0 |
+| Duplicate packets |                     0 |
+| PE2 HIGH          |               ≈ 82 µs |
+| PE3 HIGH          |             ≈ 0.24 ms |
+
+此結果證明目前架構已經可以支援約 1 ms 一筆資料的連續傳輸測試。
+
+---
+
+## 10. Integration Responsibility
+
+正式整合 EtherCAT application 後，同事不需要修改或管理 HM SPI module 的內部機制。
+
+Application 只需要提供目前每 1 ms 更新的 EtherCAT data buffer：
+
+```c
+(void)HM_SendPacket(
+    ethercat_buffer,
+    HM_DATA_SIZE);
+```
+
+Application 不需要：
+
+```text
+管理 Ring Buffer
+管理 sequence number
+等待 SPI 完成
+控制 DMA
+控制 PE3 notification
+處理 SPI transmission completion
+```
+
+以上工作全部由 HM SPI module 負責。
+
+---
+
+## 11. Known Limitation
+
+目前沒有針對「CM5 關機後重新啟動，而 STM32H755 持續運作」設計額外的自動重新同步機制。
+
+實驗確認：
+
+* CM5 持續運作並監聽 PE3 時，系統可以正常連續傳輸。
+* STM32H755 reset 後可以恢復正常傳輸。
+* CM5 作為 server 正常運作時不會頻繁重新啟動。
+
+因此目前版本不為低機率的 CM5 restart scenario 增加額外 API 或重新設計 transmission state machine，以維持目前已驗證的穩定架構。
+
+---
+
+## 12. Conclusion
+
+本階段已完成並驗證：
+
+1. STM32H755 SPI2 Slave → Raspberry Pi CM5 SPI Master 資料傳輸。
+2. 204-byte packet continuous transmission。
+3. SPI clock 提升至 12 MHz。
+4. DMA TX 正常運作。
+5. 4-buffer Ring Buffer 正常運作。
+6. 16-bit sequence number 自動管理。
+7. `HM_SendPacket()` 成為 EtherCAT application 的單一入口。
+8. SPI transmission 採 Non-Blocking architecture。
+9. DMA completion callback 正確釋放 PE3 notification。
+10. CM5 連續接收約 1000 packets/s，未發生 SPI、sequence、lost 或 duplicate error。
+11. 示波器確認 PE3 notification timing 與 DMA transmission timing 符合設計。
+
+**因此，本階段的 STM32H755 SPI2 DMA Non-Blocking transmission architecture 已完成實機驗證，可進入 EtherCAT application 正式整合階段。**
+
+---
+
+## 以你現在這個**已經驗證成功的版本**來看，如果要讓同事把 EtherCAT 每 1 ms 更新的資料交給你的 SPI 傳輸模組，不能只交 `HM_SendPacket()` 那個 function 的程式碼。
+
+## 同事實際需要的介面
+
+同事只需要知道：
+
+```c
+(void)HM_SendPacket(
+    ethercat_buffer,
+    HM_DATA_SIZE);
+```
+
+也就是：
+
+* `ethercat_buffer`：同事每 1 ms 更新的 EtherCAT application data
+* `HM_DATA_SIZE`：目前為 `202`
+* 不需要知道 Ring Buffer
+* 不需要知道 sequence
+* 不需要知道 DMA
+* 不需要知道 PE3
+* 不需要知道 SPI2
+* 不需要等待 DMA 完成
+
+### 你的模組需要一起交付的 4 個檔案
+
+是的，建議完整交這 **4 個檔案**：
+
+| 檔案                          | 必要性    | 用途                                |
+| --------------------------- | ------ | --------------------------------- |
+| `CM7/Core/Inc/hm_spi.h`     | **需要** | 對外 API，提供 `HM_SendPacket()`       |
+| `CM7/Core/Src/hm_spi.c`     | **需要** | Ring Buffer + sequence + DMA 傳送流程 |
+| `CM7/Core/Inc/spi2_slave.h` | **需要** | SPI2 Slave 模組介面                   |
+| `CM7/Core/Src/spi2_slave.c` | **需要** | SPI2 + DMA 實際傳輸                   |
+
+也就是：
+
+```text
+hm_spi.h
+    ↓
+hm_spi.c
+    ↓
+spi2_slave.h
+    ↓
+spi2_slave.c
+    ↓
+STM32H755 SPI2 + DMA
+    ↓
+CM5
+```
+
+### 但有一個很重要的區分
+
+**這 4 個檔案是你的 SPI 傳輸模組，不代表同事需要修改這 4 個檔案。**
+
+同事只需要：
+
+```c
+#include "hm_spi.h"
+```
+
+然後在他的 EtherCAT 資料更新流程中：
+
+```c
+(void)HM_SendPacket(
+    ethercat_buffer,
+    HM_DATA_SIZE);
+```
+
+即可。
+
+他的程式**不要碰**：
+
+```c
+hm_ring_buffer
+hm_write_pointer
+hm_read_pointer
+hm_count
+hm_sequence
+SPI2_Slave_SendPacket()
+HM_OnSpiTxComplete()
+DMA
+PE3
+```
+
+這些全部由你的模組管理。
+
+---
+
+### 另外還有一個不能漏掉的部分
+
+除了這 4 個 `.h/.c` 檔案，**STM32 專案本身還必須保留目前已驗證成功的硬體初始化設定**，尤其是：
+
+* `SPI2`
+* `DMA1 Stream0`
+* SPI2 TX DMA request / mapping
+* PE3 notification GPIO
+* SPI2 GPIO Alternate Function
+* DMA IRQ
+* SPI2 IRQ  中斷程式 宣告設置
+
+所以如果你的同事是把你的模組**整合進他現有的 STM32H755 CM7 project**，不能只複製 4 個檔案後就期待它自動工作；他的 CubeMX/初始化設定必須與現在這個已驗證版本一致。
+
+不過就**應用程式呼叫介面**而言，你的目標已經達成：
+
+> **同事只看到一個入口 `HM_SendPacket()`，以及一個 EtherCAT data buffer。**
+
+這才是目前最適合交付的架構。

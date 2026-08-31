@@ -253,57 +253,24 @@ Error_Handler();
 
   while (1)
   {
+    
     static uint32_t last_test_tick = 0U;
     uint32_t now = HAL_GetTick();
 
-    /*
-     * Test producer:
-     * generate one packet every 500 ms. 500U
-     * generate one packet every 1 ms. 1U
-     */
     if ((now - last_test_tick) >= 1U)
     {
         last_test_tick = now;
 
-        (void)HM_WritePacket(
+        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_2, GPIO_PIN_SET);// 示波器測試用接腳，用於測試執行以下 function 需要花費多久時間。
+
+        (void)HM_SendPacket(
             spi_test_data,
             HM_DATA_SIZE);
+
+        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_2, GPIO_PIN_RESET);
+
     }
-
-    /*
-     * Non-blocking SPI consumer:
-     *
-     * HM_Process() must be called continuously.
-     *
-     * It never waits for SPI completion.
-     */
-    (void)HM_Process();
-
-
-
-/*
-    static uint32_t last_test_tick = 0U;
-    uint32_t now = HAL_GetTick();
-
-    if ((now - last_test_tick) >= 500U)
-    {
-        last_test_tick = now;
-
-        HAL_StatusTypeDef write_status;
-        HAL_StatusTypeDef process_status;
-
-        write_status =
-            HM_WritePacket(spi_test_data, HM_DATA_SIZE);
-
-        if (write_status == HAL_OK)
-        {
-            process_status = HM_Process();
-
-            (void)process_status;
-        }
-    }
-*/
-
+    
 
     /* USER CODE END WHILE */
 
@@ -435,12 +402,22 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOF_CLK_ENABLE();
+
+    
+  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_2, GPIO_PIN_RESET);
+
+  GPIO_InitStruct.Pin = GPIO_PIN_2;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(CM5_TRIG_GPIO_Port, CM5_TRIG_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : CM5_TRIG_Pin */
-  GPIO_InitStruct.Pin = CM5_TRIG_Pin;
+  GPIO_InitStruct.Pin = CM5_TRIG_Pin|GPIO_PIN_2;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;

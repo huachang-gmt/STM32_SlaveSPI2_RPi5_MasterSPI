@@ -10,36 +10,6 @@ extern "C" {
 
 /*
  * ============================================================================
- * HM SPI Application Interface
- * ============================================================================
- *
- * 本模組負責：
- *
- *     1. 管理 4 個 Ring Buffer
- *     2. 管理 write/read pointer
- *     3. 管理 buffer 使用狀態
- *     4. 管理 SPI packet sequence number
- *     5. 將 EtherCAT application data 放入 Ring Buffer
- *
- * 正式整合時，同事只需要呼叫：
- *
- *     HM_WritePacket(ethercat_buffer, length);
- *
- * 同事不需要知道：
- *
- *     - Ring Buffer 有幾個 buffer
- *     - write pointer
- *     - read pointer
- *     - sequence number
- *     - overflow
- *     - SPI 傳送細節
- *
- * ============================================================================
- */
-
-
-/*
- * ============================================================================
  * Configuration
  * ============================================================================
  *
@@ -84,48 +54,36 @@ HAL_StatusTypeDef HM_Init(void);
 
 
 /**
- * @brief Write one EtherCAT packet into the HM Ring Buffer.
+ * @brief Submit one EtherCAT data packet for SPI transmission.
+ *
+ * This is the only API that the EtherCAT application needs to call.
  *
  * @param data
- *        Pointer to the EtherCAT application data.
+ *        Pointer to EtherCAT application data.
  *
  * @param length
  *        Number of EtherCAT application data bytes.
  *
  * @return
  *        HAL_OK    : data accepted.
- *        HAL_BUSY  : Ring Buffer is full.
+ *        HAL_BUSY  : Ring Buffer is full or SPI is temporarily busy.
  *        HAL_ERROR : invalid parameter.
- *
- * @note
- *        HM automatically adds the 16-bit sequence number
- *        to packet Byte 0 and Byte 1.
- */
-HAL_StatusTypeDef HM_WritePacket(const uint8_t *data,
-                                 uint16_t length);
-
-
-/**
- * @brief Start transmission of one committed packet.
- *
- * @return
- *        HAL_OK   : SPI transmission was successfully started.
- *        HAL_BUSY : No packet available or SPI is still busy.
- *        HAL_ERROR: SPI transmission could not be started.
  *
  * @note
  *        This function is NON-BLOCKING.
  *
- *        HAL_OK means that the SPI transmission has been started,
- *        not that the packet has already been transmitted.
+ *        It does not wait for SPI transmission to complete.
  *
- *        The Ring Buffer slot is released only after
- *        HM_OnSpiTxComplete() is called from the SPI
- *        transmit-complete callback.
+ *        The HM module internally handles:
+ *            - Ring Buffer
+ *            - sequence number
+ *            - SPI transmission
+ *            - DMA completion
  */
-HAL_StatusTypeDef HM_Process(void);
+HAL_StatusTypeDef HM_SendPacket(const uint8_t *data,
+                                uint16_t length);
 
-
+ 
 /**
  * @brief Get current number of packets waiting for transmission.
  */
