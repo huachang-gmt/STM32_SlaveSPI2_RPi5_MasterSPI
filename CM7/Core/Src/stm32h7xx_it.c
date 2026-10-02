@@ -222,7 +222,7 @@ void SPI2_IRQHandler(void)
     HAL_SPI_IRQHandler(&hspi2);
 }
 
-void DMA1_Stream0_IRQHandler(void)
+void DMA1_Stream2_IRQHandler(void)
 {
     HAL_DMA_IRQHandler(&hdma_spi2_tx);
 }
